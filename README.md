@@ -8,7 +8,17 @@ View, edit, check, test and fix Camunda DMN decision tables, with no installer. 
 - **Test.** Evaluate the table for any inputs with a per-rule trace, keep test suites next to your DMN files, and see which rules your tests never reach.
 - **Check in CI.** `dmn-check` reads files, folders and globs and writes text, JSON, JUnit XML or SARIF.
 
-## Quick start
+## Download
+
+Get the zip from the [latest release](https://github.com/th3pajay/dmn-viewer/releases/latest), unzip it anywhere and run `dmn-viewer.exe`. Nothing is installed, and nothing else is needed.
+
+Every release is built by GitHub Actions from the tagged source. To check that a download is that build and unchanged:
+
+    gh attestation verify dmn-viewer-<version>-windows-x64.zip --repo th3pajay/dmn-viewer
+
+The release notes also list SHA-256 checksums and VirusTotal scans. The executables are not code-signed yet, so on first start Windows SmartScreen may say "Windows protected your PC": choose **More info**, then **Run anyway**.
+
+## Build from source
 
     cargo build --release
     target\release\dmn-viewer.exe examples\shipping-fees.dmn

@@ -1,0 +1,96 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build, verify and publish a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $version) { throw "Tag v$tag does not match Cargo.toml version $version" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "dmn-viewer-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/dmn-viewer.exe, target/release/dmn-check.exe, README.md, LICENSE $name
+          Copy-Item assets/LICENSES.txt "$name/THIRD-PARTY-LICENSES.txt"
+          Copy-Item examples "$name/examples" -Recurse
+          Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
+          Copy-Item target/release/dmn-viewer.exe, target/release/dmn-check.exe .
+          $files = "$name.zip", "dmn-viewer.exe", "dmn-check.exe"
+          Get-FileHash $files -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content SHA256SUMS.txt -Encoding ascii
+          "ZIP=$name.zip" >> $env:GITHUB_ENV
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ env.ZIP }}
+            dmn-viewer.exe
+            dmn-check.exe
+
+      - name: Scan with VirusTotal
+        id: virustotal
+        uses: crazy-max/ghaction-virustotal@v4
+        continue-on-error: true
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: |
+            dmn-viewer.exe
+            dmn-check.exe
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCANS: ${{ steps.virustotal.outputs.analysis }}
+        run: |
+          $sums = (Get-Content SHA256SUMS.txt -Raw).Trim()
+          $scans = if ($env:SCANS) { ($env:SCANS -split ',' | ForEach-Object { $f, $u = $_ -split '=', 2; "- [$f]($u)" }) -join "`n" } else { "- Not available for this release." }
+          $notes = @"
+          Portable Windows build: unzip ``$env:ZIP`` anywhere and run ``dmn-viewer.exe``. Nothing is installed. ``dmn-check.exe`` is the command-line checker.
+
+          ### Verify the download
+
+          These files were built by GitHub Actions from this tag's source; the build log is linked under the Actions tab.
+
+          Check the build provenance with the [GitHub CLI](https://cli.github.com/):
+
+              gh attestation verify $env:ZIP --repo ${{ github.repository }}
+
+          Check the SHA-256 checksums (PowerShell: ``Get-FileHash <file>``):
+
+          ``````
+          $sums
+          ``````
+
+          VirusTotal scans:
+          $scans
+
+          ### First start
+
+          The executables are not code-signed yet, so Windows SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
+          "@
+          Set-Content notes.md $notes -Encoding utf8
+          gh release create "${{ github.ref_name }}" $env:ZIP dmn-viewer.exe dmn-check.exe SHA256SUMS.txt --title "DMN Viewer ${{ github.ref_name }}" --notes-file notes.md
