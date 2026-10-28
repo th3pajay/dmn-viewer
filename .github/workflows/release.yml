@@ -28,6 +28,46 @@ jobs:
       - run: cargo test --release
       - run: cargo build --release
 
+      # Code signing through SignPath. Skipped until the repository variable SIGNPATH_ORGANIZATION_ID is set.
+      - name: Upload the unsigned executables
+        id: unsigned
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-executables
+          path: |
+            target/release/dmn-viewer.exe
+            target/release/dmn-check.exe
+          if-no-files-found: error
+
+      - name: Sign with SignPath
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'dmn-viewer' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          parameters: |
+            version: "${{ env.VERSION }}"
+          wait-for-completion: true
+          # Each release is approved by hand in SignPath; this is how long the run waits for that.
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+
+      - name: Use the signed executables
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          foreach ($exe in "dmn-viewer.exe", "dmn-check.exe") {
+            $sig = Get-AuthenticodeSignature "signed/$exe"
+            if ($sig.Status -ne "Valid") { throw "$exe is not validly signed: $($sig.Status) $($sig.StatusMessage)" }
+            Copy-Item "signed/$exe" "target/release/$exe" -Force
+            "$exe signed by: $($sig.SignerCertificate.Subject)"
+          }
+          "SIGNED=true" >> $env:GITHUB_ENV
+
       - name: Package
         shell: pwsh
         run: |
@@ -68,6 +108,11 @@ jobs:
         run: |
           $sums = (Get-Content SHA256SUMS.txt -Raw).Trim()
           $scans = if ($env:SCANS) { ($env:SCANS -split ',' | ForEach-Object { $f, $u = $_ -split '=', 2; "- [$f]($u)" }) -join "`n" } else { "- Not available for this release." }
+          $signing = if ($env:SIGNED -eq "true") {
+            "The executables are code-signed (Properties > Digital Signatures). Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). See the [code signing policy](https://github.com/${{ github.repository }}#code-signing-policy)."
+          } else {
+            "The executables are not code-signed yet, so Windows SmartScreen may show ""Windows protected your PC"". Choose **More info**, then **Run anyway**. See the [code signing policy](https://github.com/${{ github.repository }}#code-signing-policy)."
+          }
           $notes = @"
           Portable Windows build: unzip ``$env:ZIP`` anywhere and run ``dmn-viewer.exe``. Nothing is installed. ``dmn-check.exe`` is the command-line checker.
 
@@ -88,9 +133,9 @@ jobs:
           VirusTotal scans:
           $scans
 
-          ### First start
+          ### Code signing
 
-          The executables are not code-signed yet, so Windows SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**.
+          $signing
           "@
           Set-Content notes.md $notes -Encoding utf8
           gh release create "${{ github.ref_name }}" $env:ZIP dmn-viewer.exe dmn-check.exe SHA256SUMS.txt --title "DMN Viewer ${{ github.ref_name }}" --notes-file notes.md

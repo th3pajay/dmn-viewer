@@ -16,7 +16,18 @@ Every release is built by GitHub Actions from the tagged source. To check that a
 
     gh attestation verify dmn-viewer-<version>-windows-x64.zip --repo th3pajay/dmn-viewer
 
-The release notes also list SHA-256 checksums and VirusTotal scans. The executables are not code-signed yet, so on first start Windows SmartScreen may say "Windows protected your PC": choose **More info**, then **Run anyway**.
+The release notes also list SHA-256 checksums and VirusTotal scans, and say whether the executables are code-signed. Unsigned executables may make Windows SmartScreen say "Windows protected your PC" on first start: choose **More info**, then **Run anyway**.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [th3pajay](https://github.com/th3pajay)
+- Approvers: [th3pajay](https://github.com/th3pajay)
+
+Only executables built by this repository's release workflow from its own source are signed, and every signing request is approved by hand.
+
+Privacy: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
 ## Build from source
 
