@@ -783,16 +783,14 @@ impl App {
         let Some(l) = self.writable() else { return };
         match l.commit(std::slice::from_ref(&edit)) {
             Ok(false) => {}
-            Ok(true) => {
-                match edit {
-                    Edit::InsertRule { at, .. } | Edit::MoveRule { to: at, .. } => {
-                        self.selected = Some(at);
-                        self.scroll_to = Some(at);
-                    }
-                    Edit::DeleteRule { rule, .. } => self.selected = self.selected.filter(|&s| s != rule).map(|s| if s > rule { s - 1 } else { s }),
-                    _ => {}
+            Ok(true) => match edit {
+                Edit::InsertRule { at, .. } | Edit::MoveRule { to: at, .. } => {
+                    self.selected = Some(at);
+                    self.scroll_to = Some(at);
                 }
-            }
+                Edit::DeleteRule { rule, .. } => self.selected = self.selected.filter(|&s| s != rule).map(|s| if s > rule { s - 1 } else { s }),
+                _ => {}
+            },
             Err(e) => self.error = Some(format!("Edit not applied: {e}")),
         }
     }

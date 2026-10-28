@@ -1,4 +1,3 @@
-
 use crate::model::DecisionTable;
 use serde_json::{Value, json};
 

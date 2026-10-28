@@ -1,8 +1,8 @@
-
 use crate::{Act, App, Pending, View, bold, hex, ic, small_button};
 use dmn_viewer::edit::Edit;
 use dmn_viewer::export::{self, Format};
-use dmn_viewer::lint::{self, Column as Col};
+use dmn_viewer::lint;
+use dmn_viewer::rules::{self, RuleClip};
 use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, RichText, Sense, Stroke, vec2};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -41,10 +41,7 @@ pub struct Settings {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("XDG_CONFIG_HOME")).map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("dmn-viewer").join("settings.txt"))
 }
 
@@ -257,13 +254,6 @@ pub struct Info {
     tip: Option<String>,
 }
 
-#[derive(Clone)]
-struct RuleClip {
-    inputs: Vec<String>,
-    outputs: Vec<String>,
-    note: String,
-}
-
 #[derive(Default)]
 pub struct Palette {
     query: String,
@@ -317,24 +307,6 @@ fn fuzzy(query: &str, text: &str) -> Option<i32> {
         at = found + 1;
     }
     Some(score)
-}
-
-fn replace_text(text: &str, find: &str, with: &str, case: bool) -> Option<String> {
-    if find.is_empty() {
-        return None;
-    }
-    let (hay, needle) = if case { (text.to_string(), find.to_string()) } else { (text.to_ascii_lowercase(), find.to_ascii_lowercase()) };
-    if !hay.contains(&needle) {
-        return None;
-    }
-    let (mut out, mut from) = (String::new(), 0);
-    while let Some(i) = hay[from..].find(&needle) {
-        out.push_str(&text[from..from + i]);
-        out.push_str(with);
-        from += i + needle.len();
-    }
-    out.push_str(&text[from..]);
-    Some(out)
 }
 
 fn info_of(label: Cow<'static, str>, icon: &'static str, group: &'static str, enabled: bool) -> Info {
@@ -589,22 +561,15 @@ impl App {
     }
 
     fn copy_rule(&mut self) {
-        let Some(rule) = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision)).and_then(|t| Some((t, t.rules.get(self.selected?)?))) else { return };
-        let (t, r) = rule;
-        self.shell.clip = Some(RuleClip { inputs: r.inputs.iter().map(|e| e.text.clone()).collect(), outputs: r.outputs.iter().map(|e| e.text.clone()).collect(), note: t.note(r).to_string() });
+        let table = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision));
+        let Some(clip) = table.zip(self.selected).and_then(|(t, r)| rules::copy(t, r)) else { return };
+        self.shell.clip = Some(clip);
         self.shell.notice = Some("Rule copied".into());
     }
 
     fn paste_rule(&mut self) {
-        let (Some(clip), dec) = (self.shell.clip.clone(), self.decision) else { return };
-        let Some(t) = self.loaded.as_ref().and_then(|l| l.defs.table(dec)) else { return };
-        let at = self.selected.map_or(t.rules.len(), |r| r + 1);
-        let mut edits = vec![Edit::InsertRule { decision: dec, at, copy_of: None }];
-        let cols = clip.inputs.iter().take(t.inputs.len()).enumerate().map(|(i, x)| (Col::Input(i), x)).chain(clip.outputs.iter().take(t.outputs.len()).enumerate().map(|(i, x)| (Col::Output(i), x)));
-        edits.extend(cols.filter(|(_, x)| !x.trim().is_empty()).map(|(col, x)| Edit::Cell { decision: dec, rule: at, col, text: x.clone() }));
-        if !clip.note.is_empty() {
-            edits.push(Edit::Note { decision: dec, rule: at, text: clip.note });
-        }
+        let table = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision));
+        let Some((edits, at)) = table.zip(self.shell.clip.as_ref()).map(|(t, clip)| rules::paste(t, self.decision, self.selected, clip)) else { return };
         self.commit_group(edits, Some(at));
     }
 
@@ -627,16 +592,7 @@ impl App {
 
     fn step_issue(&mut self, forward: bool) {
         let Some(l) = &self.loaded else { return };
-        let mut rules: Vec<usize> = l.issues.iter().filter(|i| i.decision == Some(self.decision)).flat_map(|i| i.rules.iter().copied()).collect();
-        rules.sort_unstable();
-        rules.dedup();
-        let pick = match (self.selected, forward) {
-            (Some(s), true) => rules.iter().find(|&&r| r > s).or(rules.first()),
-            (Some(s), false) => rules.iter().rev().find(|&&r| r < s).or(rules.last()),
-            (None, true) => rules.first(),
-            (None, false) => rules.last(),
-        };
-        match pick.copied() {
+        match rules::next_issue(&l.issues, self.decision, self.selected, forward) {
             Some(r) => {
                 self.selected = Some(r);
                 self.scroll_to = Some(r);
@@ -645,7 +601,6 @@ impl App {
             None => self.shell.notice = Some("No issues on a rule in this decision".into()),
         }
     }
-
 
     pub fn chrome_bar(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
@@ -677,7 +632,10 @@ impl App {
                 });
             }
             Chrome::Palette => {
-                egui::Panel::top("toolbar").exact_size(46.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::symmetric(14, 0)).stroke(Stroke::new(1.0, t.line))).show(ui, |ui| self.toolbar(ui, &s, acts));
+                egui::Panel::top("toolbar")
+                    .exact_size(46.0)
+                    .frame(Frame::new().fill(t.surface).inner_margin(Margin::symmetric(14, 0)).stroke(Stroke::new(1.0, t.line)))
+                    .show(ui, |ui| self.toolbar(ui, &s, acts));
             }
         }
     }
@@ -848,7 +806,8 @@ impl App {
                 });
                 self.tool(ui, s, Cmd::Theme, acts);
                 let hint = RichText::new(format!("{}  Search commands", ic::SEARCH)).color(t.muted);
-                let mut pill = egui::Button::new(hint).fill(if t.dark { t.canvas } else { hex(0xf9fafb) }).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(8)).min_size(vec2(260.0, 28.0));
+                let mut pill =
+                    egui::Button::new(hint).fill(if t.dark { t.canvas } else { hex(0xf9fafb) }).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(8)).min_size(vec2(260.0, 28.0));
                 if let Some(k) = self.key_text(ui.ctx(), Cmd::Palette) {
                     pill = pill.shortcut_text(k);
                 }
@@ -876,7 +835,6 @@ impl App {
         }
     }
 
-
     fn palette_items(&self, s: &State, query: &str) -> Vec<(Cmd, Info, i32)> {
         let n_decisions = self.loaded.as_ref().map_or(0, |l| l.defs.decisions.len());
         let dynamic = (0..n_decisions).map(Cmd::Go).chain((0..self.settings.recent.len()).map(Cmd::OpenRecent));
@@ -900,7 +858,9 @@ impl App {
         let s = self.state();
         let items = self.palette_items(&s, &p.query);
         let n = items.len();
-        let (down, up, enter, esc) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape)));
+        let (down, up, enter, esc) = ctx.input_mut(|i| {
+            (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::Enter), i.consume_key(Modifiers::NONE, Key::Escape))
+        });
         if down {
             p.sel = (p.sel + 1).min(n.saturating_sub(1));
             p.scroll = true;
@@ -938,7 +898,13 @@ impl App {
                         } else if resp.hovered() && inf.enabled {
                             ui.painter().rect_filled(rect, CornerRadius::same(6), t.chip);
                         }
-                        let fg = if !inf.enabled { t.faint } else if active { t.accent } else { t.text };
+                        let fg = if !inf.enabled {
+                            t.faint
+                        } else if active {
+                            t.accent
+                        } else {
+                            t.text
+                        };
                         ui.painter().text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, inf.icon, FontId::proportional(15.0), if inf.enabled { t.muted } else { t.faint });
                         ui.painter().text(rect.left_center() + vec2(36.0, 0.0), Align2::LEFT_CENTER, &inf.label, FontId::proportional(13.5), fg);
                         let right = match self.key_text(ctx, *c) {
@@ -966,21 +932,9 @@ impl App {
         }
     }
 
-
     fn replace_edits(&self, f: &Replace) -> Vec<Edit> {
-        let Some(t) = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision)) else { return vec![] };
-        let dec = self.decision;
-        let mut edits = Vec::new();
-        for (rule, r) in t.rules.iter().enumerate() {
-            let inputs = r.inputs.iter().enumerate().map(|(i, e)| (Col::Input(i), &e.text));
-            let outputs = r.outputs.iter().enumerate().map(|(i, e)| (Col::Output(i), &e.text));
-            for (col, text) in inputs.chain(outputs) {
-                if let Some(new) = replace_text(text, &f.find, &f.with, f.case) {
-                    edits.push(Edit::Cell { decision: dec, rule, col, text: new });
-                }
-            }
-        }
-        edits
+        let table = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision));
+        table.map_or_else(Vec::new, |t| rules::replace(t, self.decision, &f.find, &f.with, f.case))
     }
 
     pub fn replace_window(&mut self, ctx: &egui::Context) {
@@ -1003,7 +957,8 @@ impl App {
             });
             ui.checkbox(&mut f.case, "Match case");
             ui.add_space(4.0);
-            let summary = if f.find.is_empty() { "Searches every input and output cell of this decision.".to_string() } else { format!("{} cell{} match", edits.len(), if edits.len() == 1 { "" } else { "s" }) };
+            let summary =
+                if f.find.is_empty() { "Searches every input and output cell of this decision.".to_string() } else { format!("{} cell{} match", edits.len(), if edits.len() == 1 { "" } else { "s" }) };
             ui.label(RichText::new(summary).color(t.muted));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1077,14 +1032,6 @@ mod tests {
         let at_start = fuzzy("save", "File Save").unwrap();
         let scattered = fuzzy("save", "Show all views entirely").unwrap();
         assert!(at_start > scattered);
-    }
-
-    #[test]
-    fn replace_keeps_the_rest_of_the_cell() {
-        assert_eq!(replace_text("x > 5 or x < 2", "x", "age", true).as_deref(), Some("age > 5 or age < 2"));
-        assert_eq!(replace_text("\"Gold\"", "gold", "\"Silver\"", false).as_deref(), Some("\"\"Silver\"\""));
-        assert_eq!(replace_text("\"Gold\"", "gold", "x", true), None);
-        assert_eq!(replace_text("x", "", "y", false), None);
     }
 
     #[test]
