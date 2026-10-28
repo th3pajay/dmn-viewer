@@ -1,7 +1,7 @@
 //! The open DMN file and its edit history, kept apart from the egui view state.
 
 use dmn_viewer::diff::{self, Hunk, Spans};
-use dmn_viewer::edit::{self, Column, Edit};
+use dmn_viewer::edit::{Column, Edit};
 use dmn_viewer::fix;
 use dmn_viewer::lint::{self, Issue};
 use dmn_viewer::model::{DecisionLogic, Definitions};
@@ -72,26 +72,20 @@ impl Document {
         self.dirty
     }
 
-    /// Applies an edit. `Ok(false)` means it changed nothing; on error nothing changes.
-    pub fn commit(&mut self, edit: &Edit) -> Result<bool, String> {
-        let new = edit::apply(&self.xml, edit)?;
+    /// Applies edits as one undo step. `Ok(false)` means they changed nothing; on error nothing changes.
+    pub fn commit(&mut self, edits: &[Edit]) -> Result<bool, String> {
+        let new = fix::apply(&self.xml, edits)?;
         if new == self.xml {
             return Ok(false);
         }
-        let cell = match edit {
-            Edit::Cell { decision, rule, col, text } => Some(CellText { decision: *decision, rule: *rule, col: *col, text: text.clone() }),
+        let cell = match edits {
+            [Edit::Cell { decision, rule, col, text }] => Some(CellText { decision: *decision, rule: *rule, col: *col, text: text.clone() }),
             _ => None,
         };
         // A cell edit changes one entry's text and the line numbers after it; everything else is re-parsed.
         let defs = if cell.is_none() { Some(parse::parse(&new)?) } else { None };
-        let (at, old_end, new_end) = diff::changed(&self.xml, &new);
-        let delta = newlines(&new[at..new_end]) - newlines(&self.xml[at..old_end]);
         let before = cell.as_ref().map(|c| CellText { text: self.cell_text(c), ..c.clone() });
-        self.undo.push(Change { at, len: new_end - at, text: self.xml[at..old_end].to_string(), cell: before });
-        self.redo.clear();
-        self.spans.splice(at, old_end - at, new_end - at);
-        self.xml = new;
-        self.refresh_dirty();
+        let delta = self.record(new, before);
         match (defs, cell) {
             (Some(d), _) => self.defs = d,
             (None, Some(c)) => self.set_cell(&c, delta),
@@ -101,22 +95,15 @@ impl Document {
         Ok(true)
     }
 
-    /// Applies several edits as one undo step (a fix). On error nothing changes.
-    pub fn commit_all(&mut self, edits: &[Edit]) -> Result<bool, String> {
-        let new = fix::apply(&self.xml, edits)?;
-        if new == self.xml {
-            return Ok(false);
-        }
-        let defs = parse::parse(&new)?;
+    fn record(&mut self, new: String, cell: Option<CellText>) -> i64 {
         let (at, old_end, new_end) = diff::changed(&self.xml, &new);
-        self.undo.push(Change { at, len: new_end - at, text: self.xml[at..old_end].to_string(), cell: None });
+        let delta = newlines(&new[at..new_end]) - newlines(&self.xml[at..old_end]);
+        self.undo.push(Change { at, len: new_end - at, text: self.xml[at..old_end].to_string(), cell });
         self.redo.clear();
         self.spans.splice(at, old_end - at, new_end - at);
         self.xml = new;
         self.refresh_dirty();
-        self.issues = lint::lint(&defs);
-        self.defs = defs;
-        Ok(true)
+        delta
     }
 
     /// How many steps undo can go back; a fix session undoes down to the depth it started at.
@@ -142,11 +129,7 @@ impl Document {
         if !self.dirty {
             return Ok(());
         }
-        let (at, old_end, new_end) = diff::changed(&self.xml, &self.saved);
-        self.undo.push(Change { at, len: new_end - at, text: self.xml[at..old_end].to_string(), cell: None });
-        self.redo.clear();
-        self.xml.clone_from(&self.saved);
-        self.refresh_dirty();
+        self.record(self.saved.clone(), None);
         self.reparse()
     }
 
@@ -286,9 +269,9 @@ mod tests {
         let path = scratch("revisions.dmn", &example());
         let mut doc = Document::open(path.clone()).unwrap();
         let mut seen = vec![doc.revision(), Document::open(path).unwrap().revision()];
-        doc.commit(&cell(0, Column::Output(0), "1")).unwrap();
+        doc.commit(&[cell(0, Column::Output(0), "1")]).unwrap();
         seen.push(doc.revision());
-        doc.commit_all(&[cell(0, Column::Output(0), "2"), cell(1, Column::Output(0), "3")]).unwrap();
+        doc.commit(&[cell(0, Column::Output(0), "2"), cell(1, Column::Output(0), "3")]).unwrap();
         seen.push(doc.revision());
         doc.undo().unwrap();
         seen.push(doc.revision());
@@ -317,10 +300,10 @@ mod tests {
                 cell(6, Column::Input(0), "-"),
             ];
             for e in &edits {
-                assert!(doc.commit(e).unwrap(), "{e:?}");
+                assert!(doc.commit(std::slice::from_ref(e)).unwrap(), "{e:?}");
                 assert_in_sync(&doc);
             }
-            assert!(!doc.commit(&cell(0, Column::Input(1), "<= 6")).unwrap(), "same text again is a no-op");
+            assert!(!doc.commit(&[cell(0, Column::Input(1), "<= 6")]).unwrap(), "same text again is a no-op");
         }
     }
 
@@ -339,7 +322,7 @@ mod tests {
         ];
         let mut states = vec![doc.xml.clone()];
         for e in &edits {
-            doc.commit(e).unwrap();
+            doc.commit(std::slice::from_ref(e)).unwrap();
             states.push(doc.xml.clone());
         }
         for want in states.iter().rev().skip(1) {
@@ -356,7 +339,7 @@ mod tests {
         }
         assert!(!doc.redo().unwrap());
         doc.undo().unwrap();
-        doc.commit(&cell(0, Column::Output(1), "\"NEW\"")).unwrap();
+        doc.commit(&[cell(0, Column::Output(1), "\"NEW\"")]).unwrap();
         assert!(!doc.redo().unwrap(), "a new edit clears redo");
     }
 
@@ -364,7 +347,7 @@ mod tests {
     fn undo_keeps_only_the_changed_spans() {
         let mut doc = Document::open(scratch("memory.dmn", &example())).unwrap();
         for i in 0..50 {
-            doc.commit(&cell(i % 7, Column::Output(0), &i.to_string())).unwrap();
+            doc.commit(&[cell(i % 7, Column::Output(0), &i.to_string())]).unwrap();
         }
         let kept: usize = doc.undo.iter().map(|c| c.text.len()).sum();
         assert!(kept < 200, "undo keeps {kept} bytes for 50 one-number edits");
@@ -377,12 +360,12 @@ mod tests {
         let mut doc = Document::open(path.clone()).unwrap();
         assert!(!doc.dirty());
         let old = doc.defs.table(0).unwrap().rules[0].outputs[0].text.clone();
-        doc.commit(&cell(0, Column::Output(0), "1")).unwrap();
+        doc.commit(&[cell(0, Column::Output(0), "1")]).unwrap();
         assert!(doc.dirty());
-        doc.commit(&cell(0, Column::Output(0), &old)).unwrap();
+        doc.commit(&[cell(0, Column::Output(0), &old)]).unwrap();
         assert!(!doc.dirty(), "editing back to the saved text is clean again");
 
-        doc.commit(&Edit::DeleteRule { decision: 0, rule: 0 }).unwrap();
+        doc.commit(&[Edit::DeleteRule { decision: 0, rule: 0 }]).unwrap();
         let edited = doc.xml.clone();
         doc.discard().unwrap();
         assert_eq!((doc.xml.as_str(), doc.dirty()), (original.as_str(), false));
@@ -411,10 +394,10 @@ mod tests {
         let path = scratch("review.dmn", &example());
         let mut doc = Document::open(path).unwrap();
         assert!(doc.changes().is_empty());
-        doc.commit(&cell(0, Column::Output(0), "1.25")).unwrap();
-        doc.commit(&cell(5, Column::Input(1), "> 99")).unwrap();
-        doc.commit(&Edit::InsertRule { decision: 0, at: 2, copy_of: Some(1) }).unwrap();
-        doc.commit(&cell(0, Column::Output(0), "1.5")).unwrap();
+        doc.commit(&[cell(0, Column::Output(0), "1.25")]).unwrap();
+        doc.commit(&[cell(5, Column::Input(1), "> 99")]).unwrap();
+        doc.commit(&[Edit::InsertRule { decision: 0, at: 2, copy_of: Some(1) }]).unwrap();
+        doc.commit(&[cell(0, Column::Output(0), "1.5")]).unwrap();
         let hunks = doc.changes();
         assert_eq!(hunks.len(), 3, "{hunks:#?}");
         assert_eq!(replay(&doc), doc.xml);
@@ -434,7 +417,7 @@ mod tests {
         assert_eq!(doc.changes().len(), 1);
         doc.save().unwrap();
         assert!(doc.changes().is_empty());
-        doc.commit(&cell(1, Column::Output(0), "2")).unwrap();
+        doc.commit(&[cell(1, Column::Output(0), "2")]).unwrap();
         doc.discard().unwrap();
         assert!(doc.changes().is_empty());
     }

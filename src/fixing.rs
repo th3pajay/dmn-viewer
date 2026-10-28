@@ -88,7 +88,7 @@ impl FixSession {
         let Some(f) = self.choice.and_then(|i| c.fixes.get(i)) else { return Err("This fix deletes something, so pick it yourself first.".into()) };
         let changes = f.edits.iter().flat_map(|e| fix::describe(&doc.defs, e)).collect();
         let applied = Applied { title: c.issue.title(), label: f.label.clone(), changes, key: c.key.clone() };
-        doc.commit_all(&f.edits)?;
+        doc.commit(&f.edits)?;
         self.applied.push(applied);
         self.front = None;
         self.settle(doc, skipped);
@@ -248,7 +248,7 @@ mod tests {
         let mut d = messy("undo.dmn");
         let skipped = HashSet::new();
         // An edit from before the session.
-        d.commit(&dmn_viewer::edit::Edit::Cell { decision: 0, rule: 2, col: dmn_viewer::edit::Column::Output(0), text: r#""D""#.into() }).unwrap();
+        d.commit(&[dmn_viewer::edit::Edit::Cell { decision: 0, rule: 2, col: dmn_viewer::edit::Column::Output(0), text: r#""D""#.into() }]).unwrap();
         let start = d.xml.clone();
         let mut s = FixSession::start(&d, &skipped, None);
         let first = s.current().unwrap().key.clone();

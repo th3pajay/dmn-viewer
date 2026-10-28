@@ -610,7 +610,7 @@ impl App {
 
     fn commit_group(&mut self, edits: Vec<Edit>, select: Option<usize>) -> bool {
         let Some(l) = self.writable() else { return false };
-        match l.commit_all(&edits) {
+        match l.commit(&edits) {
             Ok(changed) => {
                 if let (true, Some(r)) = (changed, select) {
                     self.selected = Some(r);

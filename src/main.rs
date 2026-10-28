@@ -781,7 +781,7 @@ impl App {
 
     fn commit(&mut self, edit: Edit) {
         let Some(l) = self.writable() else { return };
-        match l.commit(&edit) {
+        match l.commit(std::slice::from_ref(&edit)) {
             Ok(false) => {}
             Ok(true) => {
                 match edit {
