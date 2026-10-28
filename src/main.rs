@@ -2511,7 +2511,12 @@ fn main() -> eframe::Result {
     let args = parse_args();
     let dark = std::env::args().any(|a| a == "--dark");
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("DMN Viewer").with_inner_size([1440.0, 880.0]).with_min_inner_size([900.0, 500.0]).with_drag_and_drop(true),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("DMN Viewer")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).unwrap_or_default())
+            .with_inner_size([1440.0, 880.0])
+            .with_min_inner_size([900.0, 500.0])
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
