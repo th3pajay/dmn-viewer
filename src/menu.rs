@@ -1,5 +1,4 @@
 
-use crate::document::READ_ONLY;
 use crate::{Act, App, Pending, View, bold, hex, ic, small_button};
 use dmn_viewer::edit::Edit;
 use dmn_viewer::export::{self, Format};
@@ -610,23 +609,12 @@ impl App {
     }
 
     fn commit_group(&mut self, edits: Vec<Edit>, select: Option<usize>) -> bool {
-        let Some(l) = self.loaded.as_mut() else { return false };
-        if !l.editable {
-            self.error = Some(READ_ONLY.into());
-            return false;
-        }
-        if self.fixing.is_some() {
-            self.error = Some("The table is read-only while fixes are being reviewed. Stop the fix session to edit it.".into());
-            return false;
-        }
+        let Some(l) = self.writable() else { return false };
         match l.commit_all(&edits) {
             Ok(changed) => {
-                if changed {
-                    self.tester.session.invalidate();
-                    if let Some(r) = select {
-                        self.selected = Some(r);
-                        self.scroll_to = Some(r);
-                    }
+                if let (true, Some(r)) = (changed, select) {
+                    self.selected = Some(r);
+                    self.scroll_to = Some(r);
                 }
                 changed
             }

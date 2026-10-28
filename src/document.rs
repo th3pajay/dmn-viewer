@@ -8,6 +8,13 @@ use dmn_viewer::model::{DecisionLogic, Definitions};
 use dmn_viewer::parse;
 use dmn_viewer::unary::UnaryTests;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static REVISIONS: AtomicU64 = AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    REVISIONS.fetch_add(1, Ordering::Relaxed)
+}
 
 pub const READ_ONLY: &str = "This file is not valid UTF-8, so it is open read-only: saving it could change bytes outside the edits.";
 
@@ -58,7 +65,7 @@ impl Document {
         };
         let defs = parse::parse(&xml)?;
         let issues = lint::lint(&defs);
-        Ok(Document { path, saved: xml.clone(), xml, defs, issues, editable, dirty: false, undo: vec![], redo: vec![], spans: Spans::default(), revision: 0 })
+        Ok(Document { path, saved: xml.clone(), xml, defs, issues, editable, dirty: false, undo: vec![], redo: vec![], spans: Spans::default(), revision: next_revision() })
     }
 
     pub fn dirty(&self) -> bool {
@@ -197,7 +204,7 @@ impl Document {
     }
 
     fn refresh_dirty(&mut self) {
-        self.revision += 1;
+        self.revision = next_revision();
         self.dirty = self.xml != self.saved;
         if !self.dirty {
             self.spans.clear();
@@ -272,6 +279,27 @@ mod tests {
 
     fn cell(rule: usize, col: Column, text: &str) -> Edit {
         Edit::Cell { decision: 0, rule, col, text: text.into() }
+    }
+
+    #[test]
+    fn every_open_and_every_change_gets_a_fresh_revision() {
+        let path = scratch("revisions.dmn", &example());
+        let mut doc = Document::open(path.clone()).unwrap();
+        let mut seen = vec![doc.revision(), Document::open(path).unwrap().revision()];
+        doc.commit(&cell(0, Column::Output(0), "1")).unwrap();
+        seen.push(doc.revision());
+        doc.commit_all(&[cell(0, Column::Output(0), "2"), cell(1, Column::Output(0), "3")]).unwrap();
+        seen.push(doc.revision());
+        doc.undo().unwrap();
+        seen.push(doc.revision());
+        doc.redo().unwrap();
+        seen.push(doc.revision());
+        doc.discard().unwrap();
+        seen.push(doc.revision());
+        let mut unique = seen.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), seen.len(), "{seen:?}");
     }
 
     #[test]

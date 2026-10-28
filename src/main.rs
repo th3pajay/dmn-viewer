@@ -721,7 +721,6 @@ impl App {
                         };
                     }
                 }
-                self.tester.session.invalidate();
                 self.loaded = Some(doc);
                 self.fixing = None;
                 self.fix_skipped.clear();
@@ -767,20 +766,24 @@ impl App {
         }
     }
 
-    fn commit(&mut self, edit: Edit) {
-        let Some(l) = self.loaded.as_mut() else { return };
+    fn writable(&mut self) -> Option<&mut Document> {
+        let l = self.loaded.as_mut()?;
         if !l.editable {
             self.error = Some(READ_ONLY.into());
-            return;
+            return None;
         }
         if self.fixing.is_some() {
             self.error = Some("The table is read-only while fixes are being reviewed. Stop the fix session to edit it.".into());
-            return;
+            return None;
         }
+        Some(l)
+    }
+
+    fn commit(&mut self, edit: Edit) {
+        let Some(l) = self.writable() else { return };
         match l.commit(&edit) {
             Ok(false) => {}
             Ok(true) => {
-                self.tester.session.invalidate();
                 match edit {
                     Edit::InsertRule { at, .. } | Edit::MoveRule { to: at, .. } => {
                         self.selected = Some(at);
@@ -789,7 +792,6 @@ impl App {
                     Edit::DeleteRule { rule, .. } => self.selected = self.selected.filter(|&s| s != rule).map(|s| if s > rule { s - 1 } else { s }),
                     _ => {}
                 }
-                self.clamp_selection();
             }
             Err(e) => self.error = Some(format!("Edit not applied: {e}")),
         }
@@ -809,13 +811,9 @@ impl App {
     fn history(&mut self, redo: bool) {
         self.editing = None;
         let Some(l) = self.loaded.as_mut() else { return };
-        match if redo { l.redo() } else { l.undo() } {
-            Ok(false) => return,
-            Ok(true) => {}
-            Err(e) => self.error = Some(e),
+        if let Err(e) = if redo { l.redo() } else { l.undo() } {
+            self.error = Some(e);
         }
-        self.tester.session.invalidate();
-        self.clamp_selection();
     }
 
     /// Throws away unsaved edits (undo can still bring them back).
@@ -825,8 +823,6 @@ impl App {
         if let Err(e) = l.discard() {
             self.error = Some(e);
         }
-        self.tester.session.invalidate();
-        self.clamp_selection();
     }
 
     fn clamp_selection(&mut self) {
@@ -1137,7 +1133,6 @@ impl App {
         }
         let Some(l) = self.loaded.as_mut() else { return };
         let skipped = &mut self.fix_skipped;
-        let mut changed = false;
         let result = match (a, self.fixing.as_mut()) {
             (Act::FixStart(only), None) => {
                 if !l.editable {
@@ -1158,10 +1153,7 @@ impl App {
                 s.move_choice(down);
                 Ok(())
             }
-            (Act::FixApply, Some(s)) => {
-                changed = true;
-                s.apply(l, skipped)
-            }
+            (Act::FixApply, Some(s)) => s.apply(l, skipped),
             (Act::FixSkip, Some(s)) => {
                 s.skip(l, skipped);
                 Ok(())
@@ -1170,14 +1162,8 @@ impl App {
                 s.stop();
                 Ok(())
             }
-            (Act::FixUndo, Some(s)) => {
-                changed = true;
-                s.undo(l, skipped).map(|_| ())
-            }
-            (Act::FixUndoAll, Some(s)) => {
-                changed = true;
-                s.undo_all(l, skipped)
-            }
+            (Act::FixUndo, Some(s)) => s.undo(l, skipped).map(|_| ()),
+            (Act::FixUndoAll, Some(s)) => s.undo_all(l, skipped),
             (Act::FixResetSkipped, Some(s)) => {
                 skipped.clear();
                 s.settle(l, skipped);
@@ -1198,10 +1184,6 @@ impl App {
             }
             _ => Ok(()),
         };
-        if changed {
-            self.tester.session.invalidate();
-            self.clamp_selection();
-        }
         match result {
             Ok(()) => {
                 if self.error.as_deref().is_some_and(|e| e.starts_with("Fix not applied")) {
@@ -2388,6 +2370,10 @@ impl eframe::App for App {
             self.pending = Some(Pending::Close);
         }
         self.refresh_fixable();
+        if let Some(l) = &self.loaded {
+            self.tester.session.sync(l.revision());
+        }
+        self.clamp_selection();
         // Fix session keys, when no text box has focus: Enter apply, S skip, Esc stop, arrows choose.
         if self.fixing.is_some() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
             let step = self.fixing.as_ref().is_some_and(|s| s.current().is_some());

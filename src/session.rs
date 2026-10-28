@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 /// The tester's working state for one decision table at a time: the typed inputs, the loaded
 /// test suite, and their evaluated results. Results are cached until the decision, the inputs or
-/// the cases change; call `invalidate` when the definitions themselves are reloaded.
+/// the cases change, and when `sync` sees a new definitions revision.
 #[derive(Default)]
 pub struct TestSession {
     /// One text per table input. Empty means null; `""` is the empty string.
@@ -17,6 +17,7 @@ pub struct TestSession {
     suite_path: Option<PathBuf>,
     live: Option<(usize, Vec<String>, Arc<Outcome>)>,
     results: Option<Run>,
+    revision: u64,
 }
 
 /// One run of the suite against a decision, kept until the decision or the cases change.
@@ -47,6 +48,13 @@ impl TestSession {
     pub fn invalidate(&mut self) {
         self.live = None;
         self.results = None;
+    }
+
+    pub fn sync(&mut self, revision: u64) {
+        if self.revision != revision {
+            self.revision = revision;
+            self.invalidate();
+        }
     }
 
     pub fn clear_inputs(&mut self) {

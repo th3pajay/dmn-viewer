@@ -73,3 +73,16 @@ fn the_session_caches_coverage_with_the_results() {
     s.invalidate();
     assert!(!Arc::ptr_eq(&b, &s.coverage(&defs, 0).unwrap()), "invalidate forces a re-run");
 }
+
+#[test]
+fn sync_re_runs_only_when_the_revision_changes() {
+    let defs = defs();
+    let mut s = TestSession::default();
+    s.load(&example("shipping-fees.tests.json")).unwrap();
+    s.sync(7);
+    let a = s.coverage(&defs, 0).unwrap();
+    s.sync(7);
+    assert!(Arc::ptr_eq(&a, &s.coverage(&defs, 0).unwrap()), "same revision keeps the run");
+    s.sync(8);
+    assert!(!Arc::ptr_eq(&a, &s.coverage(&defs, 0).unwrap()), "a new revision forces a re-run");
+}
