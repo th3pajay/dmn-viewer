@@ -1,0 +1,8 @@
+Manrope (Manrope-Medium.ttf, Manrope-Bold.ttf)
+  SIL Open Font License 1.1 - https://github.com/sharanda/manrope
+
+IBM Plex Mono (IBMPlexMono-Regular.ttf)
+  SIL Open Font License 1.1 - https://github.com/IBM/plex
+
+Phosphor Icons (Phosphor.ttf)
+  MIT License - https://github.com/phosphor-icons/core

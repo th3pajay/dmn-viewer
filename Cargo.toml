@@ -1,0 +1,38 @@
+[package]
+name = "dmn-viewer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["th3pajay"]
+license = "MIT"
+description = "Portable viewer, editor, checker, tester and fixer for Camunda DMN decision tables"
+readme = "README.md"
+keywords = ["dmn", "camunda", "feel", "decision-table", "linter"]
+categories = ["development-tools", "command-line-utilities"]
+
+[lib]
+name = "dmn_viewer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dmn-viewer"
+path = "src/main.rs"
+
+[[bin]]
+name = "dmn-check"
+path = "src/bin/dmn-check.rs"
+
+[dependencies]
+eframe = "0.35.0"
+egui_extras = "0.35.0"
+rfd = "0.17.2"
+roxmltree = "0.21.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

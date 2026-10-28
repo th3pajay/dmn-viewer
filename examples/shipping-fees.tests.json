@@ -1,0 +1,58 @@
+{
+  "decision": "ShippingFee",
+  "cases": [
+    {
+      "name": "EU small parcel",
+      "inputs": { "Region": "EU", "Weight": 2.5, "Express": false, "OrderDate": "20260314" },
+      "expected": { "Fee": 4.5, "Carrier": "POSTAL", "Label": "EU-260314" },
+      "expectRules": [1]
+    },
+    {
+      "name": "EU parcel at the 5 kg boundary",
+      "inputs": { "Region": "EU", "Weight": 5, "Express": false, "OrderDate": "20260314" },
+      "expected": { "Fee": 4.5, "Carrier": "POSTAL" },
+      "expectRules": [1]
+    },
+    {
+      "name": "EU medium parcel",
+      "inputs": { "Region": "EU", "Weight": 12, "Express": false, "OrderDate": "20260314" },
+      "expected": { "Fee": 9.9, "Carrier": "ROADLINE", "Label": "EU-260314" },
+      "expectRules": [2]
+    },
+    {
+      "name": "EU freight beats express",
+      "inputs": { "Region": "EU", "Weight": 80, "Express": true, "OrderDate": "20260314" },
+      "expected": { "Fee": 24, "Carrier": "FREIGHTCO", "Label": "EU-F-260314" },
+      "expectRules": [3]
+    },
+    {
+      "name": "NA express",
+      "inputs": { "Region": "NA", "Weight": 3, "Express": true, "OrderDate": "20260401" },
+      "expected": { "Fee": 19.5, "Carrier": "AIRFAST", "Label": "NA-X-260401" },
+      "expectRules": [4]
+    },
+    {
+      "name": "NA standard",
+      "inputs": { "Region": "NA", "Weight": 15, "Express": false, "OrderDate": "20260401" },
+      "expected": { "Fee": 12, "Carrier": "ROADLINE", "Label": "NA-260401" },
+      "expectRules": [5]
+    },
+    {
+      "name": "APAC goes international",
+      "inputs": { "Region": "APAC", "Weight": 1, "Express": false, "OrderDate": "20260501" },
+      "expected": { "Fee": 35, "Carrier": "GLOBALSHIP", "Label": "INT-260501" },
+      "expectRules": [6]
+    },
+    {
+      "name": "Heavy NA standard falls back to review",
+      "inputs": { "Region": "NA", "Weight": 40, "Express": false, "OrderDate": "20260501" },
+      "expected": { "Fee": 49, "Carrier": "MANUAL", "Label": "REVIEW" },
+      "expectRules": [7]
+    },
+    {
+      "name": "Missing OrderDate breaks the JavaScript label",
+      "inputs": { "Region": "EU", "Weight": 30, "Express": false },
+      "expectError": true
+    }
+  ]
+}

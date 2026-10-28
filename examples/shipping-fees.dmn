@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/" xmlns:dmndi="https://www.omg.org/spec/DMN/20191111/DMNDI/" xmlns:dc="http://www.omg.org/spec/DMN/20180521/DC/" xmlns:camunda="http://camunda.org/schema/1.0/dmn" id="shippingFees" name="Shipping Fees" namespace="http://camunda.org/schema/1.0/dmn">
+  <decision id="ShippingFee" name="Shipping Fee" camunda:historyTimeToLive="30">
+    <decisionTable id="ShippingFeeTable" hitPolicy="FIRST">
+      <input id="InputRegion" label="Region">
+        <inputExpression id="InputRegionExpr" typeRef="string" expressionLanguage="juel">
+          <text>Region</text>
+        </inputExpression>
+        <inputValues id="InputRegionValues">
+          <text>"EU","NA","APAC","LATAM"</text>
+        </inputValues>
+      </input>
+      <input id="InputWeight" label="Weight (kg)">
+        <inputExpression id="InputWeightExpr" typeRef="double" expressionLanguage="juel">
+          <text>Weight</text>
+        </inputExpression>
+      </input>
+      <input id="InputExpress" label="Express">
+        <inputExpression id="InputExpressExpr" typeRef="boolean" expressionLanguage="juel">
+          <text>Express</text>
+        </inputExpression>
+      </input>
+      <input id="InputOrderDate" label="OrderDate">
+        <inputExpression id="InputOrderDateExpr" typeRef="string" expressionLanguage="juel">
+          <text>OrderDate</text>
+        </inputExpression>
+      </input>
+      <output id="OutputFee" label="Fee" name="Fee" typeRef="double" />
+      <output id="OutputCarrier" label="Carrier" name="Carrier" typeRef="string" />
+      <output id="OutputLabel" label="Label" name="Label" typeRef="string" />
+      <rule id="Rule_EuSmall">
+        <description>Small parcels inside the EU</description>
+        <inputEntry id="Rule_EuSmall_Region"><text>"EU"</text></inputEntry>
+        <inputEntry id="Rule_EuSmall_Weight"><text>&lt;= 5</text></inputEntry>
+        <inputEntry id="Rule_EuSmall_Express"><text>false</text></inputEntry>
+        <inputEntry id="Rule_EuSmall_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_EuSmall_Fee"><text>4.5</text></outputEntry>
+        <outputEntry id="Rule_EuSmall_Carrier"><text>"POSTAL"</text></outputEntry>
+        <outputEntry id="Rule_EuSmall_Label"><text>"EU-" + substring(OrderDate, 3, 6)</text></outputEntry>
+      </rule>
+      <rule id="Rule_EuMedium">
+        <inputEntry id="Rule_EuMedium_Region"><text>"EU"</text></inputEntry>
+        <inputEntry id="Rule_EuMedium_Weight"><text>]5..20]</text></inputEntry>
+        <inputEntry id="Rule_EuMedium_Express"><text>false</text></inputEntry>
+        <inputEntry id="Rule_EuMedium_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_EuMedium_Fee"><text>9.9</text></outputEntry>
+        <outputEntry id="Rule_EuMedium_Carrier"><text>"ROADLINE"</text></outputEntry>
+        <outputEntry id="Rule_EuMedium_Label"><text>"EU-" + substring(OrderDate, 3, 6)</text></outputEntry>
+      </rule>
+      <rule id="Rule_EuHeavy">
+        <description>Freight, express or not</description>
+        <inputEntry id="Rule_EuHeavy_Region"><text>"EU"</text></inputEntry>
+        <inputEntry id="Rule_EuHeavy_Weight"><text>&gt; 20</text></inputEntry>
+        <inputEntry id="Rule_EuHeavy_Express"><text></text></inputEntry>
+        <inputEntry id="Rule_EuHeavy_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_EuHeavy_Fee"><text>24</text></outputEntry>
+        <outputEntry id="Rule_EuHeavy_Carrier"><text>"FREIGHTCO"</text></outputEntry>
+        <outputEntry id="Rule_EuHeavy_Label" expressionLanguage="javascript"><text>"EU-F-" + OrderDate.substring(2,8)</text></outputEntry>
+      </rule>
+      <rule id="Rule_Express">
+        <inputEntry id="Rule_Express_Region"><text>"EU","NA"</text></inputEntry>
+        <inputEntry id="Rule_Express_Weight"><text></text></inputEntry>
+        <inputEntry id="Rule_Express_Express"><text>true</text></inputEntry>
+        <inputEntry id="Rule_Express_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_Express_Fee"><text>19.5</text></outputEntry>
+        <outputEntry id="Rule_Express_Carrier"><text>"AIRFAST"</text></outputEntry>
+        <outputEntry id="Rule_Express_Label" expressionLanguage="javascript"><text>Region + "-X-" + OrderDate.substring(2,8)</text></outputEntry>
+      </rule>
+      <rule id="Rule_NaStandard">
+        <inputEntry id="Rule_NaStandard_Region"><text>"NA"</text></inputEntry>
+        <inputEntry id="Rule_NaStandard_Weight"><text>&lt;= 20</text></inputEntry>
+        <inputEntry id="Rule_NaStandard_Express"><text>false</text></inputEntry>
+        <inputEntry id="Rule_NaStandard_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_NaStandard_Fee"><text>12</text></outputEntry>
+        <outputEntry id="Rule_NaStandard_Carrier"><text>"ROADLINE"</text></outputEntry>
+        <outputEntry id="Rule_NaStandard_Label" expressionLanguage="javascript"><text>"NA-" + OrderDate.substring(2,8)</text></outputEntry>
+      </rule>
+      <rule id="Rule_International">
+        <description>Everything outside EU and NA</description>
+        <inputEntry id="Rule_International_Region"><text>not("EU","NA")</text></inputEntry>
+        <inputEntry id="Rule_International_Weight"><text></text></inputEntry>
+        <inputEntry id="Rule_International_Express"><text></text></inputEntry>
+        <inputEntry id="Rule_International_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_International_Fee"><text>35</text></outputEntry>
+        <outputEntry id="Rule_International_Carrier"><text>"GLOBALSHIP"</text></outputEntry>
+        <outputEntry id="Rule_International_Label"><text>"INT-" + substring(OrderDate, 3, 6)</text></outputEntry>
+      </rule>
+      <rule id="Rule_Fallback">
+        <description>Anything left goes to manual review</description>
+        <inputEntry id="Rule_Fallback_Region"><text></text></inputEntry>
+        <inputEntry id="Rule_Fallback_Weight"><text></text></inputEntry>
+        <inputEntry id="Rule_Fallback_Express"><text></text></inputEntry>
+        <inputEntry id="Rule_Fallback_Date"><text></text></inputEntry>
+        <outputEntry id="Rule_Fallback_Fee"><text>49</text></outputEntry>
+        <outputEntry id="Rule_Fallback_Carrier"><text>"MANUAL"</text></outputEntry>
+        <outputEntry id="Rule_Fallback_Label"><text>"REVIEW"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <dmndi:DMNDI>
+    <dmndi:DMNDiagram id="ShippingFeesDiagram">
+      <dmndi:DMNShape id="ShippingFeeShape" dmnElementRef="ShippingFee">
+        <dc:Bounds height="80" width="180" x="160" y="80" />
+      </dmndi:DMNShape>
+    </dmndi:DMNDiagram>
+  </dmndi:DMNDI>
+</definitions>
