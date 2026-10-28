@@ -2,6 +2,7 @@
 
 mod document;
 mod fixing;
+mod menu;
 
 use dmn_viewer::diff::{self, Hunk};
 use dmn_viewer::edit::Edit;
@@ -42,6 +43,28 @@ mod ic {
     pub const ERASER: &str = "\u{E21E}";
     pub const DECISION: &str = "\u{E67C}";
     pub const GRID: &str = "\u{E464}";
+    pub const SAVE_AS: &str = "\u{EAF4}";
+    pub const EXPORT: &str = "\u{EAF0}";
+    pub const CLOCK: &str = "\u{E1A0}";
+    pub const UNDO: &str = "\u{E08A}";
+    pub const REDO: &str = "\u{E08C}";
+    pub const UNDO_ALL: &str = "\u{E038}";
+    pub const REPLACE: &str = "\u{E83C}";
+    pub const ZOOM_IN: &str = "\u{E310}";
+    pub const ZOOM_OUT: &str = "\u{E30E}";
+    pub const ROWS: &str = "\u{E5A2}";
+    pub const SIDEBAR: &str = "\u{EC24}";
+    pub const DIFF: &str = "\u{E27C}";
+    pub const COMMAND: &str = "\u{E1C4}";
+    pub const INFO: &str = "\u{E2CE}";
+    pub const KEYBOARD: &str = "\u{E2D8}";
+    pub const LIST: &str = "\u{E2F0}";
+    pub const LAYOUT: &str = "\u{E434}";
+    pub const CLIPBOARD: &str = "\u{E198}";
+    pub const PASTE: &str = "\u{E198}";
+    pub const UP: &str = "\u{E52E}";
+    pub const DOWN: &str = "\u{E518}";
+    pub const ROW_ABOVE: &str = "\u{E52E}";
 }
 
 #[derive(Clone, Copy)]
@@ -463,7 +486,7 @@ fn edit_box(ui: &mut egui::Ui, ed: &mut Editing, acts: &mut Vec<Act>) {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum View {
     Rules,
     Issues,
@@ -507,6 +530,7 @@ enum Act {
     FixClose,
     FixReview,
     FixResetSkipped,
+    Cmd(menu::Cmd),
 }
 
 /// Which issues have an automatic fix, recomputed when the document or the skip list changes.
@@ -551,6 +575,8 @@ struct App {
     /// Issues skipped in a fix session, by key; forgotten when the file is opened or reloaded.
     fix_skipped: HashSet<String>,
     fixable: Option<Fixable>,
+    settings: menu::Settings,
+    shell: menu::Shell,
 }
 
 fn lang_long(short: &str) -> &str {
@@ -657,7 +683,12 @@ impl App {
             fixing: None,
             fix_skipped: HashSet::new(),
             fixable: None,
+            settings: menu::Settings::load(),
+            shell: menu::Shell::default(),
         };
+        if let Some(c) = args.chrome {
+            app.settings.chrome = c;
+        }
         if let Some(p) = args.path {
             app.load(p);
         }
@@ -700,6 +731,7 @@ impl App {
                 self.header_form = None;
                 self.selected = None;
                 self.scroll_to = None;
+                self.remember(path);
             }
             Err(e) => self.error = Some(format!("Could not open {}: {e}", path.display())),
         }
@@ -1067,6 +1099,7 @@ impl App {
                 Act::Undo => self.history(false),
                 Act::Redo => self.history(true),
                 Act::Review => self.open_review(),
+                Act::Cmd(c) => self.run_cmd(ctx, c),
                 fix => self.fix_act(fix),
             }
         }
@@ -1226,17 +1259,6 @@ impl App {
             }
             ui.add_space(12.0);
         }
-        group_label(ui, t, "File");
-        if nav_item(ui, t, ic::OPEN, "Open…", None, false).on_hover_text("Ctrl+O").clicked() {
-            acts.push(Act::Open);
-        }
-        if self.loaded.is_some() && nav_item(ui, t, ic::RELOAD, "Reload", None, false).on_hover_text("F5").clicked() {
-            acts.push(Act::Reload);
-        }
-        let (icon, label) = if t.dark { (ic::SUN, "Light mode") } else { (ic::MOON, "Dark mode") };
-        if nav_item(ui, t, icon, label, None, false).clicked() {
-            acts.push(Act::ToggleDark);
-        }
     }
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
@@ -1314,7 +1336,10 @@ impl App {
                                 if !self.filter.is_empty() && ui.add(egui::Button::new(RichText::new(ic::X).color(t.muted)).frame(false)).clicked() {
                                     self.filter.clear();
                                 }
-                                ui.add(egui::TextEdit::singleline(&mut self.filter).frame(Frame::NONE).hint_text("Filter rules").desired_width(170.0));
+                                let filter = ui.add(egui::TextEdit::singleline(&mut self.filter).frame(Frame::NONE).hint_text("Filter rules").desired_width(170.0));
+                                if std::mem::take(&mut self.shell.focus_filter) {
+                                    filter.request_focus();
+                                }
                                 ui.label(RichText::new(ic::SEARCH).color(t.faint));
                             });
                         });
@@ -1343,6 +1368,7 @@ impl App {
             }
         };
         let nrules = tb.rules.len();
+        let row_height = self.row_height();
         let issues: Vec<&Issue> = l.issues.iter().filter(|i| i.decision == Some(self.decision)).collect();
         let fired: Vec<usize> = if self.tester.session.is_active() && self.tester.session.fields.len() == tb.inputs.len() {
             self.tester.session.outcome(&l.defs, self.decision).map(|o| o.fired.clone()).unwrap_or_default()
@@ -1625,7 +1651,7 @@ impl App {
                             });
                         })
                         .body(|body| {
-                            body.rows(40.0, visible.len(), |mut row| {
+                            body.rows(row_height, visible.len(), |mut row| {
                                 let ri = visible[row.index()];
                                 let r = &tb.rules[ri];
                                 let is_sel = selected == Some(ri);
@@ -2353,6 +2379,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         let mut acts = Vec::new();
+        self.shortcuts(&ctx, &mut acts);
         let dirty = self.loaded.as_ref().is_some_and(|l| l.dirty());
         if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -2422,11 +2449,16 @@ impl eframe::App for App {
             Some((results.iter().filter(|r| r.pass).count(), results.len()))
         });
 
-        egui::Panel::left("nav")
-            .resizable(false)
-            .default_size(224.0)
-            .frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 12, right: 12, top: 16, bottom: 12 }))
-            .show(ui, |ui| self.nav(ui, suite_stats, &mut acts));
+        self.chrome_bar(ui, &mut acts);
+        self.notice_bar(ui);
+
+        if self.shell.show_nav() {
+            egui::Panel::left("nav")
+                .resizable(false)
+                .default_size(224.0)
+                .frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 12, right: 12, top: 16, bottom: 12 }))
+                .show(ui, |ui| self.nav(ui, suite_stats, &mut acts));
+        }
 
         if let Some(e) = self.error.clone() {
             egui::Panel::top("err").frame(Frame::new().fill(if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) }).inner_margin(Margin::symmetric(20, 8))).show(ui, |ui| {
@@ -2443,6 +2475,8 @@ impl eframe::App for App {
 
         if self.loaded.is_none() {
             self.empty_view(ui, &mut acts);
+            self.palette_ui(&ctx, &mut acts);
+            self.help_window(&ctx);
             self.apply(&ctx, acts);
             return;
         }
@@ -2469,8 +2503,11 @@ impl eframe::App for App {
                 }
             }
         }
+        self.palette_ui(&ctx, &mut acts);
         self.apply(&ctx, acts);
         self.header_window(&ctx);
+        self.replace_window(&ctx);
+        self.help_window(&ctx);
         self.review_modal(&ctx);
         self.pending_modal(&ctx);
     }
@@ -2482,6 +2519,7 @@ struct Args {
     view: Option<View>,
     case: Option<usize>,
     rule: Option<usize>,
+    chrome: Option<menu::Chrome>,
 }
 
 fn parse_args() -> Args {
@@ -2500,6 +2538,7 @@ fn parse_args() -> Args {
             }
             "--case" => a.case = it.next().and_then(|v| v.to_string_lossy().parse().ok()),
             "--rule" => a.rule = it.next().and_then(|v| v.to_string_lossy().parse().ok()),
+            "--chrome" | "--layout" => a.chrome = it.next().and_then(|v| menu::Chrome::parse(&v.to_string_lossy())),
             "--dark" => {}
             _ => a.path = Some(PathBuf::from(x)),
         }

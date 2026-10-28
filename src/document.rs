@@ -122,6 +122,10 @@ impl Document {
         self.travel(false)
     }
 
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     pub fn redo(&mut self) -> Result<bool, String> {
         self.travel(true)
     }
@@ -145,6 +149,11 @@ impl Document {
         self.dirty = false;
         self.spans.clear();
         Ok(())
+    }
+
+    pub fn save_as(&mut self, path: PathBuf) -> Result<(), String> {
+        let old = std::mem::replace(&mut self.path, path);
+        self.save().inspect_err(|_| self.path = old)
     }
 
     /// The unsaved changes, oldest line first: compared only where edits happened since the last save.

@@ -1,6 +1,7 @@
 pub mod diff;
 pub mod edit;
 pub mod eval;
+pub mod export;
 pub mod fix;
 pub mod lint;
 pub mod model;
