@@ -195,7 +195,7 @@ impl Coverage {
     /// "7/9 rules covered (77%), 1 only by failing cases". The percentage rounds down, so 100% means all.
     pub fn summary(&self) -> String {
         let (covered, total) = (self.covered(), self.total());
-        let pct = if total == 0 { 100 } else { covered * 100 / total };
+        let pct = (covered * 100).checked_div(total).unwrap_or(100);
         let failing = self.only_failing().len();
         let tail = if failing == 0 { String::new() } else { format!(", {failing} only by failing cases") };
         format!("{covered}/{total} rules covered ({pct}%){tail}")
