@@ -8,14 +8,13 @@ use dmn_viewer::eval::{RuleStatus, Value};
 use dmn_viewer::fix;
 use dmn_viewer::lint::{self, Column as Col, Issue, Severity};
 use dmn_viewer::model::*;
-use dmn_viewer::session::TestSession;
 use dmn_viewer::suite::{self, Coverage};
 use dmn_viewer::unary::UnaryTests;
-use dmn_viewer::workspace::document::{Document, READ_ONLY};
+use dmn_viewer::workspace::document::Document;
 use dmn_viewer::workspace::fixing::FixSession;
+use dmn_viewer::workspace::{READ_ONLY, Workspace};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, TextWrapMode, vec2};
 use egui_extras::{Column, TableBuilder};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -347,7 +346,6 @@ fn card<R>(ui: &mut egui::Ui, t: &Theme, add: impl FnOnce(&mut egui::Ui) -> R) -
 
 #[derive(Default)]
 struct Tester {
-    session: TestSession,
     case_name: String,
     status: String,
 }
@@ -531,14 +529,6 @@ enum Act {
     Cmd(menu::Cmd),
 }
 
-/// Which issues have an automatic fix, recomputed when the document or the skip list changes.
-#[derive(Default)]
-struct Fixable {
-    revision: u64,
-    skipped: usize,
-    keys: HashSet<String>,
-}
-
 /// The review-changes panel. Hunks are computed once when it opens; nothing can edit the
 /// document while it is up, so their ranges stay valid.
 struct Review {
@@ -552,9 +542,8 @@ const REVIEW_HUNKS: usize = 300;
 const REVIEW_LINES: usize = 40;
 
 struct App {
-    loaded: Option<Document>,
+    loaded: Option<Workspace>,
     error: Option<String>,
-    decision: usize,
     view: View,
     filter: String,
     selected: Option<usize>,
@@ -568,11 +557,6 @@ struct App {
     pending: Option<Pending>,
     allow_close: bool,
     review: Option<Review>,
-    /// While a fix session is open the table is read-only; fixes change it one confirmed step at a time.
-    fixing: Option<FixSession>,
-    /// Issues skipped in a fix session, by key; forgotten when the file is opened or reloaded.
-    fix_skipped: HashSet<String>,
-    fixable: Option<Fixable>,
     settings: menu::Settings,
     shell: menu::Shell,
 }
@@ -664,7 +648,6 @@ impl App {
         let mut app = App {
             loaded: None,
             error: None,
-            decision: 0,
             view: View::Rules,
             filter: String::new(),
             selected: None,
@@ -678,9 +661,6 @@ impl App {
             pending: None,
             allow_close: false,
             review: None,
-            fixing: None,
-            fix_skipped: HashSet::new(),
-            fixable: None,
             settings: menu::Settings::load(),
             shell: menu::Shell::default(),
         };
@@ -697,32 +677,31 @@ impl App {
             app.selected = Some(r - 1);
             app.scroll_to = Some(r - 1);
         }
-        if let (Some(n), Some(l)) = (args.case, app.loaded.as_ref()) {
-            app.tester.session.fill_from_case(&l.defs, app.decision, n.saturating_sub(1));
+        if let (Some(n), Some(l)) = (args.case, app.loaded.as_mut()) {
+            l.tests().fill_from_case(n.saturating_sub(1));
         }
         app
     }
 
     fn load(&mut self, path: PathBuf) {
-        match Document::open(path.clone()) {
-            Ok(doc) => {
-                let editable = doc.editable;
-                let same_file = self.loaded.as_ref().is_some_and(|l| l.path == path);
-                if !same_file {
-                    self.decision = 0;
-                    self.tester = Tester::default();
-                    let suite_file = suite::default_path(&path);
-                    if suite_file.exists() {
-                        self.tester.status = match self.tester.session.load(&suite_file) {
-                            Ok(n) => format!("Loaded {n} cases from {}", suite_file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
-                            Err(e) => e,
-                        };
-                    }
+        let same_file = self.loaded.as_ref().is_some_and(|l| l.path() == path);
+        let opened = if same_file {
+            self.loaded.as_mut().expect("same file implies loaded").reload()
+        } else {
+            Workspace::open(path.clone()).map(|ws| {
+                self.tester = Tester::default();
+                if let Some(load) = ws.suite_load() {
+                    self.tester.status = match load {
+                        Ok(n) => format!("Loaded {n} cases from {}", suite::default_path(&path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+                        Err(e) => e.clone(),
+                    };
                 }
-                self.loaded = Some(doc);
-                self.fixing = None;
-                self.fix_skipped.clear();
-                self.fixable = None;
+                self.loaded = Some(ws);
+            })
+        };
+        match opened {
+            Ok(()) => {
+                let editable = self.loaded.as_ref().is_some_and(|l| l.editable());
                 self.error = (!editable).then(|| READ_ONLY.to_string());
                 self.editing = None;
                 self.header_form = None;
@@ -752,7 +731,7 @@ impl App {
         match p {
             Pending::Open => self.open_dialog(),
             Pending::Reload => {
-                if let Some(p) = self.loaded.as_ref().map(|l| l.path.clone()) {
+                if let Some(p) = self.loaded.as_ref().map(|l| l.path().to_path_buf()) {
                     self.load(p);
                 }
             }
@@ -764,21 +743,16 @@ impl App {
         }
     }
 
-    fn writable(&mut self) -> Option<&mut Document> {
-        let l = self.loaded.as_mut()?;
-        if !l.editable {
-            self.error = Some(READ_ONLY.into());
-            return None;
-        }
-        if self.fixing.is_some() {
-            self.error = Some("The table is read-only while fixes are being reviewed. Stop the fix session to edit it.".into());
-            return None;
-        }
-        Some(l)
+    fn is_fixing(&self) -> bool {
+        self.loaded.as_ref().is_some_and(|l| l.is_fixing())
+    }
+
+    fn decision(&self) -> usize {
+        self.loaded.as_ref().map_or(0, |l| l.decision())
     }
 
     fn commit(&mut self, edit: Edit) {
-        let Some(l) = self.writable() else { return };
+        let Some(l) = self.loaded.as_mut() else { return };
         match l.commit(std::slice::from_ref(&edit)) {
             Ok(false) => {}
             Ok(true) => match edit {
@@ -789,7 +763,7 @@ impl App {
                 Edit::DeleteRule { rule, .. } => self.selected = self.selected.filter(|&s| s != rule).map(|s| if s > rule { s - 1 } else { s }),
                 _ => {}
             },
-            Err(e) => self.error = Some(format!("Edit not applied: {e}")),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -797,7 +771,7 @@ impl App {
         if ed.text == ed.original {
             return;
         }
-        let decision = self.decision;
+        let decision = self.decision();
         self.commit(match ed.at {
             Cursor::Cell(rule, col) => Edit::Cell { decision, rule, col, text: ed.text },
             Cursor::Note(rule) => Edit::Note { decision, rule, text: ed.text },
@@ -822,7 +796,7 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        let n = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision)).map_or(0, |t| t.rules.len());
+        let n = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision())).map_or(0, |t| t.rules.len());
         self.selected = self.selected.filter(|&s| s < n);
     }
 
@@ -843,7 +817,7 @@ impl App {
         }
         let Some(l) = &self.loaded else { return };
         let hunks = l.changes();
-        let lines = hunks.iter().map(|h| (diff::line_count(&l.saved()[h.old.clone()]), diff::line_count(&l.xml[h.new.clone()]))).collect();
+        let lines = hunks.iter().map(|h| (diff::line_count(&l.saved()[h.old.clone()]), diff::line_count(&l.xml()[h.new.clone()]))).collect();
         self.review = Some(Review { hunks, lines });
     }
 
@@ -893,7 +867,7 @@ impl App {
                         let at = if h.old_line == h.new_line { format!("Line {}", h.new_line) } else { format!("Line {} (was {})", h.new_line, h.old_line) };
                         ui.label(RichText::new(at).size(11.5).color(t.faint));
                         side(ui, l.saved().get(h.old.clone()).unwrap_or(""), old_lines, '-', removed_bg, t.error_text);
-                        side(ui, l.xml.get(h.new.clone()).unwrap_or(""), new_lines, '+', t.accent_soft, t.text);
+                        side(ui, l.xml().get(h.new.clone()).unwrap_or(""), new_lines, '+', t.accent_soft, t.text);
                         ui.add_space(8.0);
                     }
                     if rv.hunks.len() > REVIEW_HUNKS {
@@ -928,7 +902,7 @@ impl App {
     fn pending_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let t = self.theme;
-        let file = self.loaded.as_ref().and_then(|l| l.path.file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let file = self.loaded.as_ref().and_then(|l| l.path().file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let mut choice = None;
         egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
             ui.set_width(360.0);
@@ -965,7 +939,7 @@ impl App {
 
     fn header_window(&mut self, ctx: &egui::Context) {
         let t = self.theme;
-        let decision = self.decision;
+        let decision = self.decision();
         let Some(form) = self.header_form.as_mut() else { return };
         let title = if matches!(form, HeaderForm::Input { .. }) { "Edit input" } else { "Edit output" };
         let mut open = true;
@@ -1051,11 +1025,11 @@ impl App {
                     if let Some(ed) = self.editing.take() {
                         self.commit_editing(ed);
                     }
-                    if self.decision != d {
-                        self.tester.session.fields.clear();
+                    if let Some(l) = self.loaded.as_mut()
+                        && l.set_decision(d)
+                    {
                         self.selected = None;
                     }
-                    self.decision = d;
                 }
                 Act::Open => self.guard(ctx, Pending::Open),
                 Act::Reload => self.guard(ctx, Pending::Reload),
@@ -1081,13 +1055,13 @@ impl App {
                         }
                     }
                 }
-                Act::EditHeader(c) => self.header_form = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision)).and_then(|t| HeaderForm::new(t, c)),
+                Act::EditHeader(c) => self.header_form = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision())).and_then(|t| HeaderForm::new(t, c)),
                 Act::Save => {
                     self.save();
                 }
                 // While fixing, undo takes back the session's own fixes and nothing before them.
-                Act::Undo if self.fixing.is_some() => self.fix_act(Act::FixUndo),
-                Act::Redo if self.fixing.is_some() => {}
+                Act::Undo if self.is_fixing() => self.fix_act(Act::FixUndo),
+                Act::Redo if self.is_fixing() => {}
                 Act::Undo => self.history(false),
                 Act::Redo => self.history(true),
                 Act::Review => self.open_review(),
@@ -1097,28 +1071,13 @@ impl App {
         }
     }
 
-    /// Recomputes which issues have a fix when the document or the skips changed since last time.
-    fn refresh_fixable(&mut self) {
-        let Some(l) = &self.loaded else { return };
-        if self.fixable.as_ref().is_some_and(|f| f.revision == l.revision() && f.skipped == self.fix_skipped.len()) {
-            return;
-        }
-        let keys = if l.editable { fix::queue(&l.defs, &l.issues, &HashSet::new(), None, None).into_iter().map(|c| c.key).collect() } else { HashSet::new() };
-        self.fixable = Some(Fixable { revision: l.revision(), skipped: self.fix_skipped.len(), keys });
-    }
-
-    /// Fixable issues that are not skipped.
-    fn fixable_count(&self) -> usize {
-        self.fixable.as_ref().map_or(0, |f| f.keys.iter().filter(|k| !self.fix_skipped.contains(*k)).count())
-    }
-
     /// Shows the issue on offer: its decision, and its first rule selected and scrolled to.
     fn follow_fix(&mut self) {
-        let Some(c) = self.fixing.as_ref().and_then(|s| s.current()) else { return };
-        if let Some(d) = c.issue.decision {
-            self.decision = d;
+        let Some(l) = self.loaded.as_mut() else { return };
+        let Some((decision, rule)) = l.fixing().and_then(|s| s.current()).map(|c| (c.issue.decision, c.issue.rules.iter().min().copied())) else { return };
+        if let Some(d) = decision {
+            l.set_decision(d);
         }
-        let rule = c.issue.rules.iter().min().copied();
         self.selected = rule;
         self.scroll_to = rule;
     }
@@ -1128,54 +1087,47 @@ impl App {
             self.commit_editing(ed);
         }
         let Some(l) = self.loaded.as_mut() else { return };
-        let skipped = &mut self.fix_skipped;
-        let result = match (a, self.fixing.as_mut()) {
-            (Act::FixStart(only), None) => {
-                if !l.editable {
-                    Err(READ_ONLY.to_string())
-                } else {
+        let result = match a {
+            Act::FixStart(only) => l.fix_start(only).map(|started| {
+                if started {
                     self.header_form = None;
-                    self.fixing = Some(FixSession::start(l, skipped, only));
                     self.filter.clear();
                     self.view = View::Rules;
-                    Ok(())
                 }
-            }
-            (Act::FixChoose(i), Some(s)) => {
-                s.choose(i);
+            }),
+            Act::FixChoose(i) => {
+                l.fix_choose(i);
                 Ok(())
             }
-            (Act::FixMove { down }, Some(s)) => {
-                s.move_choice(down);
+            Act::FixMove { down } => {
+                l.fix_move(down);
                 Ok(())
             }
-            (Act::FixApply, Some(s)) => s.apply(l, skipped),
-            (Act::FixSkip, Some(s)) => {
-                s.skip(l, skipped);
+            Act::FixApply => l.fix_apply(),
+            Act::FixSkip => {
+                l.fix_skip();
                 Ok(())
             }
-            (Act::FixStop, Some(s)) => {
-                s.stop();
+            Act::FixStop => {
+                l.fix_stop();
                 Ok(())
             }
-            (Act::FixUndo, Some(s)) => s.undo(l, skipped).map(|_| ()),
-            (Act::FixUndoAll, Some(s)) => s.undo_all(l, skipped),
-            (Act::FixResetSkipped, Some(s)) => {
-                skipped.clear();
-                s.settle(l, skipped);
+            Act::FixUndo => l.fix_undo(),
+            Act::FixUndoAll => l.fix_undo_all(),
+            Act::FixResetSkipped => {
+                l.fix_reset_skipped();
                 Ok(())
             }
-            (Act::FixResetSkipped, None) => {
-                skipped.clear();
+            Act::FixClose => {
+                l.fix_close();
                 Ok(())
             }
-            (Act::FixClose, Some(_)) => {
-                self.fixing = None;
-                Ok(())
-            }
-            (Act::FixReview, Some(_)) => {
-                self.fixing = None;
-                self.open_review();
+            Act::FixReview => {
+                let open = l.fixing().is_some();
+                l.fix_close();
+                if open {
+                    self.open_review();
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -1202,14 +1154,14 @@ impl App {
         ui.add_space(14.0);
         if let Some(l) = &self.loaded {
             group_label(ui, t, "Decisions");
-            for (i, d) in l.defs.decisions.iter().enumerate() {
-                let errs = l.issues.iter().filter(|x| x.decision == Some(i) && x.severity == Severity::Error).count();
+            for (i, d) in l.defs().decisions.iter().enumerate() {
+                let errs = l.issues().iter().filter(|x| x.decision == Some(i) && x.severity == Severity::Error).count();
                 let count = match &d.logic {
                     DecisionLogic::Table(tb) => tb.rules.len().to_string(),
                     DecisionLogic::Literal { .. } => "expr".into(),
                     DecisionLogic::None => "-".into(),
                 };
-                let active = self.decision == i;
+                let active = self.decision() == i;
                 let badge = if errs > 0 {
                     (errs.to_string(), t.error, hex(0xffffff))
                 } else if active {
@@ -1224,8 +1176,8 @@ impl App {
             }
             ui.add_space(12.0);
             group_label(ui, t, "View");
-            let n = l.issues.iter().filter(|x| x.decision == Some(self.decision) || x.decision.is_none()).count();
-            let errs = l.issues.iter().filter(|x| (x.decision == Some(self.decision) || x.decision.is_none()) && x.severity == Severity::Error).count();
+            let n = l.issues().iter().filter(|x| x.decision == Some(self.decision()) || x.decision.is_none()).count();
+            let errs = l.issues().iter().filter(|x| (x.decision == Some(self.decision()) || x.decision.is_none()) && x.severity == Severity::Error).count();
             let issue_badge = if errs > 0 { (n.to_string(), t.error, hex(0xffffff)) } else { (n.to_string(), t.chip, t.muted) };
             let test_badge = suite_stats.map(|(p, total)| if p == total { (format!("{p}/{total}"), t.accent_soft, t.accent) } else { (format!("{p}/{total}"), t.error, hex(0xffffff)) });
             for (v, icon, label, badge) in
@@ -1242,17 +1194,18 @@ impl App {
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
         let Some(l) = &self.loaded else { return };
-        let file = l.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        let dec = l.defs.decisions.get(self.decision);
+        let decision = l.decision();
+        let file = l.path().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let dec = l.defs().decisions.get(decision);
         let dirty = l.dirty();
-        let fixing = self.fixing.is_some();
-        let fixable = self.fixable_count();
+        let fixing = self.is_fixing();
+        let fixable = l.fixable_count();
         ui.horizontal_centered(|ui| {
             ui.label(RichText::new(format!("{file}{}  /", if dirty { " •" } else { "" })).color(t.faint)).on_hover_text(if dirty { "Unsaved changes (Ctrl+S to save)" } else { "Saved" });
             if let Some(d) = dec {
                 ui.label(bold(if d.name.is_empty() { &d.id } else { &d.name }, 14.0).color(t.text));
                 if let DecisionLogic::Table(tb) = &d.logic {
-                    if l.editable && !fixing {
+                    if l.editable() && !fixing {
                         let current = tb.hit_policy.to_ascii_uppercase();
                         let mut hp = current.clone();
                         let mut agg = tb.aggregation.as_deref().map(str::to_ascii_uppercase);
@@ -1271,7 +1224,7 @@ impl App {
                             });
                         }
                         if hp != current || agg != before {
-                            acts.push(Act::Edit(Edit::HitPolicy { decision: self.decision, hit_policy: hp, aggregation: agg }));
+                            acts.push(Act::Edit(Edit::HitPolicy { decision, hit_policy: hp, aggregation: agg }));
                         }
                     } else {
                         pill(ui, &tb.hit_policy, t.chip, t.muted).on_hover_text("Hit policy");
@@ -1301,7 +1254,7 @@ impl App {
                     acts.push(Act::FixStart(None));
                 }
                 if self.view != View::Issues && button(ui, &t, ic::COPY, "Copy report", false).on_hover_text("Copy all issues as text").clicked() {
-                    ui.ctx().copy_text(lint::report(&l.defs, &l.issues, &l.path.display().to_string()));
+                    ui.ctx().copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
                 }
                 if self.view == View::Rules {
                     Frame::new()
@@ -1328,8 +1281,23 @@ impl App {
 
     fn rules_view(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
+        let (fired, coverage) = {
+            let Some(l) = self.loaded.as_mut() else { return };
+            let decision = l.decision();
+            let mut tests = l.tests();
+            let defs = tests.defs;
+            match defs.table(decision) {
+                Some(tb) => {
+                    let fired = if tests.is_active() && tests.fields().len() == tb.inputs.len() { tests.outcome().map(|o| o.fired.clone()).unwrap_or_default() } else { Vec::new() };
+                    let coverage = (!tests.suite().cases.is_empty() && suite::targets(&tests.suite().decision, &defs.decisions[decision])).then(|| tests.coverage()).flatten();
+                    (fired, coverage)
+                }
+                None => (Vec::new(), None),
+            }
+        };
         let Some(l) = &self.loaded else { return };
-        let Some(dec) = l.defs.decisions.get(self.decision) else { return };
+        let decision = l.decision();
+        let Some(dec) = l.defs().decisions.get(decision) else { return };
         let tb = match &dec.logic {
             DecisionLogic::Table(tb) => tb,
             DecisionLogic::Literal { text, lang, variable } => {
@@ -1347,18 +1315,9 @@ impl App {
         };
         let nrules = tb.rules.len();
         let row_height = self.row_height();
-        let issues: Vec<&Issue> = l.issues.iter().filter(|i| i.decision == Some(self.decision)).collect();
-        let fired: Vec<usize> = if self.tester.session.is_active() && self.tester.session.fields.len() == tb.inputs.len() {
-            self.tester.session.outcome(&l.defs, self.decision).map(|o| o.fired.clone()).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        // Cached with the suite's results; it only re-runs when the cases or the definitions change.
-        let session = &mut self.tester.session;
-        let coverage = (!session.suite().cases.is_empty() && suite::targets(&session.suite().decision, dec)).then(|| session.coverage(&l.defs, self.decision)).flatten();
-
+        let issues: Vec<&Issue> = l.issues().iter().filter(|i| i.decision == Some(decision)).collect();
         // During a fix session the fix panel takes the drawer's place.
-        if self.fixing.is_none() {
+        if !self.is_fixing() {
             egui::Panel::right("drawer")
                 .resizable(true)
                 .default_size(330.0)
@@ -1383,8 +1342,7 @@ impl App {
         let scroll_target = self.scroll_to.take().and_then(|r| visible.iter().position(|&x| x == r));
         let selected = self.selected;
         let show_langs = self.show_langs;
-        let editable = l.editable && self.fixing.is_none();
-        let decision = self.decision;
+        let editable = l.editable() && !self.is_fixing();
 
         if let Some(r) = selected.and_then(|ri| tb.rules.get(ri).map(|r| (ri, r))) {
             let (ri, rule) = r;
@@ -1757,7 +1715,7 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(l) = &self.loaded {
                             if button(ui, t, ic::COPY, "Copy report", false).clicked() {
-                                ui.ctx().copy_text(lint::report(&l.defs, &l.issues, &l.path.display().to_string()));
+                                ui.ctx().copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
                             }
                         }
                     });
@@ -1821,12 +1779,12 @@ impl App {
                                 if !row_specific(is, nrules) && !is.rules.is_empty() {
                                     ui.label(RichText::new("table-wide").size(11.0).color(t.faint));
                                 }
-                                let key = self.loaded.as_ref().map(|l| fix::key(&l.defs, is)).filter(|k| self.fixable.as_ref().is_some_and(|f| f.keys.contains(k)));
+                                let key = self.loaded.as_ref().and_then(|l| l.fixable_key(is));
                                 if let Some(key) = key {
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if self.fix_skipped.contains(&key) {
+                                        if self.loaded.as_ref().is_some_and(|l| l.is_skipped(&key)) {
                                             pill(ui, "skipped", t.chip, t.faint).on_hover_text("Skipped in a fix session. Reload the file or use \"Show skipped again\" to be asked again.");
-                                        } else if self.fixing.is_none() && small_button(ui, t, ic::CHECK, "Fix").on_hover_text("Review the automatic fix for this issue").clicked() {
+                                        } else if !self.is_fixing() && small_button(ui, t, ic::CHECK, "Fix").on_hover_text("Review the automatic fix for this issue").clicked() {
                                             acts.push(Act::FixStart(Some(key)));
                                         }
                                     });
@@ -1866,8 +1824,8 @@ impl App {
     fn issues_view(&self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
         let Some(l) = &self.loaded else { return };
-        let issues: Vec<&Issue> = l.issues.iter().filter(|i| i.decision == Some(self.decision) || i.decision.is_none()).collect();
-        let nrules = l.defs.table(self.decision).map(|t| t.rules.len()).unwrap_or(0);
+        let issues: Vec<&Issue> = l.issues().iter().filter(|i| i.decision == Some(self.decision()) || i.decision.is_none()).collect();
+        let nrules = l.defs().table(self.decision()).map(|t| t.rules.len()).unwrap_or(0);
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin::symmetric(20, 16))).show(ui, |ui| {
             let w = ui.available_width().min(920.0);
             ui.allocate_ui(vec2(w, ui.available_height()), |ui| {
@@ -1885,7 +1843,8 @@ impl App {
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin::symmetric(20, 16))).show(ui, |ui| {
             Frame::new().fill(t.surface).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(12)).show(ui, |ui| {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.add(egui::TextEdit::multiline(&mut l.xml.as_str()).code_editor().frame(Frame::NONE).desired_width(f32::INFINITY));
+                    let mut text = l.xml();
+                    ui.add(egui::TextEdit::multiline(&mut text).code_editor().frame(Frame::NONE).desired_width(f32::INFINITY));
                 });
             });
         });
@@ -2116,15 +2075,17 @@ fn summary_panel(ui: &mut egui::Ui, t: &Theme, s: &FixSession, doc: &Document, s
     });
 }
 
-fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<usize>, tester: &mut Tester, t: &Theme, acts: &mut Vec<Act>) {
-    let Some(tb) = l.defs.table(decision) else {
+fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tester: &mut Tester, t: &Theme, acts: &mut Vec<Act>) {
+    let decision = ws.decision();
+    let mut tests = ws.tests();
+    let defs = tests.defs;
+    let Some(tb) = defs.table(decision) else {
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin::same(20))).show(ui, |ui| {
             ui.label(RichText::new("The tester works on decision tables. Pick one on the left.").color(t.muted));
         });
         return;
     };
-    let dec_name = l.defs.decisions[decision].name.as_str();
-    tester.session.fields.resize(tb.inputs.len(), String::new());
+    tests.fields_mut().resize(tb.inputs.len(), String::new());
 
     egui::Panel::left("test_inputs").resizable(true).default_size(390.0).frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 20, right: 8, top: 16, bottom: 16 })).show(ui, |ui| {
         card(ui, t, |ui| {
@@ -2133,11 +2094,11 @@ fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<
                 ui.label(bold("Inputs", 15.0).color(t.text));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if small_button(ui, t, ic::ERASER, "Clear").clicked() {
-                        tester.session.clear_inputs();
+                        tests.clear_inputs();
                     }
                     if ui.add_enabled_ui(selected.is_some(), |ui| small_button(ui, t, ic::IMPORT, "From rule")).inner.on_hover_text("Copy the selected rule's conditions into the inputs").clicked() {
                         if let Some(r) = selected.and_then(|r| tb.rules.get(r)) {
-                            tester.session.fill_from_rule(r);
+                            tests.fill_from_rule(r);
                         }
                     }
                 });
@@ -2151,16 +2112,16 @@ fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<
                         ui.label(RichText::new(inp.type_ref.clone().unwrap_or_default()).size(11.0).color(t.faint));
                     });
                     let hint = inp.input_values.clone().unwrap_or_else(|| "null".into());
-                    ui.add(egui::TextEdit::singleline(&mut tester.session.fields[i]).font(egui::TextStyle::Monospace).hint_text(hint).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                    ui.add(egui::TextEdit::singleline(&mut tests.fields_mut()[i]).font(egui::TextStyle::Monospace).hint_text(hint).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
                     ui.add_space(4.0);
                 }
             });
         });
     });
 
-    let outcome = tester.session.outcome(&l.defs, decision).expect("decision is a table");
-    let results = tester.session.results(&l.defs, decision).expect("decision is a table");
-    let coverage = suite::targets(&tester.session.suite().decision, &l.defs.decisions[decision]).then(|| tester.session.coverage(&l.defs, decision)).flatten();
+    let outcome = tests.outcome().expect("decision is a table");
+    let results = tests.results().expect("decision is a table");
+    let coverage = suite::targets(&tests.suite().decision, &defs.decisions[decision]).then(|| tests.coverage()).flatten();
 
     egui::Panel::bottom("test_suite").resizable(true).default_size(300.0).frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 8, right: 20, top: 8, bottom: 16 })).show(ui, |ui| {
         card(ui, t, |ui| {
@@ -2176,28 +2137,28 @@ fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let default_name = suite::default_path(&l.path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let default_name = suite::default_path(tests.path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     let mut save_to = None;
                     if small_button(ui, t, ic::SAVE, "Save as…").clicked() {
                         save_to = rfd::FileDialog::new().add_filter("Test suite", &["json"]).set_file_name(&default_name).save_file();
                     }
                     if small_button(ui, t, ic::SAVE, "Save").clicked() {
-                        save_to = tester.session.suite_path().map(Path::to_path_buf).or_else(|| rfd::FileDialog::new().add_filter("Test suite", &["json"]).set_file_name(&default_name).save_file());
+                        save_to = tests.suite_path().map(Path::to_path_buf).or_else(|| rfd::FileDialog::new().add_filter("Test suite", &["json"]).set_file_name(&default_name).save_file());
                     }
                     if small_button(ui, t, ic::OPEN, "Load…").clicked() {
                         if let Some(p) = rfd::FileDialog::new().add_filter("Test suite", &["json"]).pick_file() {
-                            tester.status = match tester.session.load(&p) {
+                            tester.status = match tests.load(&p) {
                                 Ok(n) => format!("Loaded {n} cases"),
                                 Err(e) => e,
                             };
                         }
                     }
                     if small_button(ui, t, ic::NEW, "New").clicked() {
-                        tester.session.new_suite(dec_name);
+                        tests.new_suite();
                         tester.status = "New empty suite".into();
                     }
                     if let Some(p) = save_to {
-                        tester.status = match tester.session.save(&p, dec_name) {
+                        tester.status = match tests.save(&p) {
                             Ok(n) => format!("Saved {n} cases"),
                             Err(e) => e,
                         };
@@ -2207,12 +2168,12 @@ fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut tester.case_name).hint_text("Name for the new case").desired_width(240.0).margin(Margin::symmetric(8, 4)));
                 if small_button(ui, t, ic::PLUS, "Add current inputs").on_hover_text("Saves the inputs and the current result as the expected result").clicked() {
-                    tester.session.add_case(&l.defs, decision, &tester.case_name);
+                    tests.add_case(&tester.case_name);
                     tester.case_name.clear();
                 }
                 ui.label(RichText::new(&tester.status).size(11.5).color(t.faint));
             });
-            if let Some(cov) = coverage.as_deref().filter(|_| !tester.session.suite().cases.is_empty()) {
+            if let Some(cov) = coverage.as_deref().filter(|_| !tests.suite().cases.is_empty()) {
                 coverage_line(ui, t, cov);
             }
             ui.add_space(4.0);
@@ -2220,11 +2181,11 @@ fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<
             let mut accept = None;
             let mut delete = None;
             egui::ScrollArea::vertical().id_salt("suite").auto_shrink([false, false]).show(ui, |ui| {
-                if tester.session.suite().cases.is_empty() {
+                if tests.suite().cases.is_empty() {
                     ui.label(RichText::new("No cases yet. Fill in the inputs, check the result, then add them as a case.").color(t.muted));
                 }
                 egui::Grid::new("suite_grid").num_columns(5).spacing([14.0, 6.0]).show(ui, |ui| {
-                    for (i, (c, r)) in tester.session.suite().cases.iter().zip(results.iter()).enumerate() {
+                    for (i, (c, r)) in tests.suite().cases.iter().zip(results.iter()).enumerate() {
                         if r.pass {
                             pill(ui, format!("{} pass", ic::CHECK), t.accent_soft, t.accent);
                         } else {
@@ -2251,13 +2212,13 @@ fn test_view(ui: &mut egui::Ui, l: &Document, decision: usize, selected: Option<
                 });
             });
             if let Some(i) = load_case {
-                tester.session.fill_from_case(&l.defs, decision, i);
+                tests.fill_from_case(i);
             }
             if let Some(i) = accept {
-                tester.session.accept(&l.defs, decision, i);
+                tests.accept(i);
             }
             if let Some(i) = delete {
-                tester.session.delete(i);
+                tests.delete(i);
             }
         });
     });
@@ -2362,17 +2323,15 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.review = None;
-            self.fixing = None;
+            if let Some(l) = self.loaded.as_mut() {
+                l.fix_close();
+            }
             self.pending = Some(Pending::Close);
-        }
-        self.refresh_fixable();
-        if let Some(l) = &self.loaded {
-            self.tester.session.sync(l.revision());
         }
         self.clamp_selection();
         // Fix session keys, when no text box has focus: Enter apply, S skip, Esc stop, arrows choose.
-        if self.fixing.is_some() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
-            let step = self.fixing.as_ref().is_some_and(|s| s.current().is_some());
+        if self.is_fixing() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
+            let step = self.loaded.as_ref().and_then(|l| l.fixing()).is_some_and(|s| s.current().is_some());
             let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
             if step {
                 if key(egui::Key::Enter) {
@@ -2392,7 +2351,7 @@ impl eframe::App for App {
         }
         // While the review panel is up the document must not change, so other shortcuts wait;
         // a fix session changes it only through its own steps.
-        let reviewing = self.review.is_some() || self.fixing.is_some();
+        let reviewing = self.review.is_some() || self.is_fixing();
         if let Some(p) = dropped.into_iter().next().filter(|_| !reviewing) {
             self.guard(&ctx, Pending::Load(p));
         }
@@ -2423,11 +2382,12 @@ impl eframe::App for App {
         }
         let t = self.theme;
 
-        let suite_stats = self.loaded.as_ref().and_then(|l| {
-            if self.tester.session.suite().cases.is_empty() {
+        let suite_stats = self.loaded.as_mut().and_then(|l| {
+            let mut tests = l.tests();
+            if tests.suite().cases.is_empty() {
                 return None;
             }
-            let results = self.tester.session.results(&l.defs, self.decision)?;
+            let results = tests.results()?;
             Some((results.iter().filter(|r| r.pass).count(), results.len()))
         });
 
@@ -2465,14 +2425,12 @@ impl eframe::App for App {
 
         egui::Panel::top("header").exact_size(60.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::symmetric(20, 0))).show(ui, |ui| self.header(ui, &mut acts));
 
-        if let (Some(s), Some(l)) = (self.fixing.as_mut(), self.loaded.as_ref()) {
-            let skipped = self.fix_skipped.len();
-            let suite = self.tester.session.suite();
+        if let Some(p) = self.loaded.as_mut().and_then(|l| l.fix_parts()) {
             egui::Panel::right("fix_panel")
                 .resizable(true)
                 .default_size(400.0)
                 .frame(Frame::new().fill(t.surface).inner_margin(Margin::same(0)))
-                .show(ui, |ui| fix_panel(ui, &t, s, l, suite, skipped, &mut acts));
+                .show(ui, |ui| fix_panel(ui, &t, p.session, p.doc, p.suite, p.skipped, &mut acts));
         }
 
         match self.view {
@@ -2480,8 +2438,8 @@ impl eframe::App for App {
             View::Issues => self.issues_view(ui, &mut acts),
             View::Xml => self.xml_view(ui),
             View::Test => {
-                if let Some(l) = self.loaded.as_ref() {
-                    test_view(ui, l, self.decision, self.selected, &mut self.tester, &t, &mut acts);
+                if let Some(l) = self.loaded.as_mut() {
+                    test_view(ui, l, self.selected, &mut self.tester, &t, &mut acts);
                 }
             }
         }

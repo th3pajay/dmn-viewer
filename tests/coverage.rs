@@ -1,9 +1,7 @@
-use dmn_viewer::session::TestSession;
 use dmn_viewer::suite::{self, Coverage, Suite};
 use dmn_viewer::{model::Definitions, parse};
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 fn example(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join(name)
@@ -53,36 +51,4 @@ fn an_empty_suite_covers_nothing() {
     assert_eq!((cov.covered(), cov.total()), (0, 7));
     assert_eq!(cov.never_fired_label(), "1-7");
     assert_eq!(Coverage::new(0, &[]).summary(), "0/0 rules covered (100%)");
-}
-
-#[test]
-fn the_session_caches_coverage_with_the_results() {
-    let defs = defs();
-    let mut s = TestSession::default();
-    s.load(&example("shipping-fees.tests.json")).unwrap();
-    let a = s.coverage(&defs, 0).unwrap();
-    assert!(Arc::ptr_eq(&a, &s.coverage(&defs, 0).unwrap()), "same cases, same run");
-    let r = s.results(&defs, 0).unwrap();
-    assert_eq!(r.len(), 9);
-    assert!(Arc::ptr_eq(&a, &s.coverage(&defs, 0).unwrap()), "results and coverage share one run");
-    s.delete(0);
-    s.delete(0);
-    let b = s.coverage(&defs, 0).unwrap();
-    assert!(!Arc::ptr_eq(&a, &b));
-    assert_eq!(b.fired_by[0], (0, 0), "both rule-1 cases are gone");
-    s.invalidate();
-    assert!(!Arc::ptr_eq(&b, &s.coverage(&defs, 0).unwrap()), "invalidate forces a re-run");
-}
-
-#[test]
-fn sync_re_runs_only_when_the_revision_changes() {
-    let defs = defs();
-    let mut s = TestSession::default();
-    s.load(&example("shipping-fees.tests.json")).unwrap();
-    s.sync(7);
-    let a = s.coverage(&defs, 0).unwrap();
-    s.sync(7);
-    assert!(Arc::ptr_eq(&a, &s.coverage(&defs, 0).unwrap()), "same revision keeps the run");
-    s.sync(8);
-    assert!(!Arc::ptr_eq(&a, &s.coverage(&defs, 0).unwrap()), "a new revision forces a re-run");
 }

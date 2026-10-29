@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use dmn_viewer::edit::{Column, Edit};
-use dmn_viewer::session::TestSession;
+use dmn_viewer::workspace::Workspace;
 use dmn_viewer::workspace::document::Document;
 use dmn_viewer::{lint, parse};
 use std::fmt::Write;
@@ -136,37 +136,32 @@ fn document(c: &mut Criterion) {
 fn session(c: &mut Criterion) {
     let xml = dmn(RULES);
     let path = scratch("sess.dmn", &xml);
-    let suite_path = scratch("sess.tests.json", &suite(CASES));
-    let doc = Document::open(path).unwrap();
-    let mut s = TestSession::default();
-    s.load(&suite_path).unwrap();
-    s.fields = vec!["EU".into(), "100.5".into(), "false".into(), "20260314".into()];
+    scratch("sess.tests.json", &suite(CASES));
+    let mut ws = Workspace::open(path).unwrap();
+    *ws.tests().fields_mut() = vec!["EU".into(), "100.5".into(), "false".into(), "20260314".into()];
     let mut g = c.benchmark_group("session");
     g.sample_size(30);
-    let rev = doc.revision();
-    s.sync(rev);
-    s.results(&doc.defs, 0);
-    s.outcome(&doc.defs, 0);
+    ws.tests().results();
+    ws.tests().outcome();
 
     g.bench_function("frame_cache_hit", |b| {
         b.iter(|| {
-            s.sync(rev);
-            black_box(s.outcome(&doc.defs, 0));
-            black_box(s.results(&doc.defs, 0));
-            black_box(s.coverage(&doc.defs, 0));
-            black_box(s.coverage(&doc.defs, 0));
-            black_box(s.results(&doc.defs, 0));
+            black_box(ws.tests().outcome());
+            black_box(ws.tests().results());
+            black_box(ws.tests().coverage());
+            black_box(ws.tests().coverage());
+            black_box(ws.tests().results());
         })
     });
 
-    let mut r = rev;
-    g.bench_function("frame_after_revision_change", |b| {
+    let mut n = 0u64;
+    g.bench_function("edit_then_frame", |b| {
         b.iter(|| {
-            r += 1;
-            s.sync(r);
-            black_box(s.outcome(&doc.defs, 0));
-            black_box(s.results(&doc.defs, 0));
-            black_box(s.coverage(&doc.defs, 0));
+            n += 1;
+            ws.commit(&[cell(RULES / 2, n.to_string())]).unwrap();
+            black_box(ws.tests().outcome());
+            black_box(ws.tests().results());
+            black_box(ws.tests().coverage());
         })
     });
     g.finish();

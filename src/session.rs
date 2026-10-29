@@ -6,13 +6,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// The tester's working state for one decision table at a time: the typed inputs, the loaded
-/// test suite, and their evaluated results. Results are cached until the decision, the inputs or
-/// the cases change, and when `sync` sees a new definitions revision.
 #[derive(Default)]
 pub struct TestSession {
-    /// One text per table input. Empty means null; `""` is the empty string.
-    pub fields: Vec<String>,
+    fields: Vec<String>,
     suite: Suite,
     suite_path: Option<PathBuf>,
     live: Option<(usize, Vec<String>, Arc<Outcome>)>,
@@ -20,7 +16,6 @@ pub struct TestSession {
     revision: u64,
 }
 
-/// One run of the suite against a decision, kept until the decision or the cases change.
 struct Run {
     decision: usize,
     cases: Vec<Case>,
@@ -41,6 +36,18 @@ impl TestSession {
         self.suite_path.as_deref()
     }
 
+    pub fn fields(&self) -> &[String] {
+        &self.fields
+    }
+
+    pub fn fields_mut(&mut self) -> &mut Vec<String> {
+        &mut self.fields
+    }
+
+    pub fn clear_fields(&mut self) {
+        self.fields.clear();
+    }
+
     pub fn is_active(&self) -> bool {
         self.fields.iter().any(|f| !f.trim().is_empty())
     }
@@ -50,7 +57,7 @@ impl TestSession {
         self.results = None;
     }
 
-    pub fn sync(&mut self, revision: u64) {
+    pub(crate) fn sync(&mut self, revision: u64) {
         if self.revision != revision {
             self.revision = revision;
             self.invalidate();
@@ -78,7 +85,6 @@ impl TestSession {
         self.run(defs, decision).map(|r| r.results.clone())
     }
 
-    /// Which rules the suite's cases fire, from the same cached run as `results`.
     pub fn coverage(&mut self, defs: &Definitions, decision: usize) -> Option<Arc<Coverage>> {
         self.run(defs, decision).map(|r| r.coverage.clone())
     }
@@ -94,7 +100,6 @@ impl TestSession {
         self.results.as_ref()
     }
 
-    /// Saves the current inputs and their current result as a new case. A blank name becomes "Case N".
     pub fn add_case(&mut self, defs: &Definitions, decision: usize, name: &str) {
         let Some(outcome) = self.outcome(defs, decision) else { return };
         let (t, decision_name) = table(defs, decision).expect("outcome implies a table");
@@ -104,7 +109,6 @@ impl TestSession {
         self.suite.cases.push(case);
     }
 
-    /// Replaces case `i`'s expectations with what the decision currently returns for it.
     pub fn accept(&mut self, defs: &Definitions, decision: usize, i: usize) {
         let Some(results) = self.results(defs, decision) else { return };
         let (t, _) = table(defs, decision).expect("results imply a table");
@@ -131,7 +135,6 @@ impl TestSession {
             .collect();
     }
 
-    /// Fills in, per input, a value the rule's condition accepts; inputs without an obvious one are left alone.
     pub fn fill_from_rule(&mut self, rule: &Rule) {
         for (e, f) in rule.inputs.iter().zip(self.fields.iter_mut()) {
             if let Some(v) = e.tests.sample() {
@@ -145,7 +148,6 @@ impl TestSession {
         self.suite_path = None;
     }
 
-    /// Returns the number of cases loaded. On error the session is unchanged.
     pub fn load(&mut self, path: &Path) -> Result<usize, String> {
         let s = suite::load(path)?;
         let n = s.cases.len();
@@ -154,7 +156,6 @@ impl TestSession {
         Ok(n)
     }
 
-    /// Returns the number of cases saved. The path becomes the suite's path even if writing fails.
     pub fn save(&mut self, path: &Path, decision_name: &str) -> Result<usize, String> {
         self.claim_suite(decision_name);
         let r = suite::save(path, &self.suite).map(|()| self.suite.cases.len());

@@ -333,16 +333,16 @@ impl App {
         let l = self.loaded.as_ref();
         State {
             doc: l.is_some(),
-            editable: l.is_some_and(|l| l.editable),
+            editable: l.is_some_and(|l| l.editable()),
             dirty: l.is_some_and(|l| l.dirty()),
-            locked: self.review.is_some() || self.fixing.is_some(),
-            table: l.and_then(|l| l.defs.table(self.decision)).is_some(),
-            nrules: l.and_then(|l| l.defs.table(self.decision)).map_or(0, |t| t.rules.len()),
+            locked: self.review.is_some() || self.is_fixing(),
+            table: l.and_then(|l| l.defs().table(self.decision())).is_some(),
+            nrules: l.and_then(|l| l.defs().table(self.decision())).map_or(0, |t| t.rules.len()),
             selected: self.selected,
             can_undo: l.is_some_and(|l| l.undo_depth() > 0),
             can_redo: l.is_some_and(|l| l.can_redo()),
-            fixable: self.fixable_count(),
-            skipped: self.fix_skipped.len(),
+            fixable: l.map_or(0, |l| l.fixable_count()),
+            skipped: l.map_or(0, |l| l.skipped_count()),
             has_clip: self.shell.clip.is_some(),
             view: self.view,
             dark: self.theme.dark,
@@ -406,8 +406,8 @@ impl App {
             Cmd::SetChrome(Chrome::Classic) => toggle(i("Layout: menu bar", ic::LIST, "View", true), s.chrome == Chrome::Classic),
             Cmd::SetChrome(Chrome::Palette) => toggle(i("Layout: toolbar and palette", ic::COMMAND, "View", true), s.chrome == Chrome::Palette),
             Cmd::Go(n) => {
-                let name = self.loaded.as_ref().and_then(|l| l.defs.decisions.get(n)).map(|d| if d.name.is_empty() { d.id.clone() } else { d.name.clone() }).unwrap_or_default();
-                toggle(info_of(Cow::Owned(name), ic::DECISION, "Go to", s.doc), s.doc && self.decision == n)
+                let name = self.loaded.as_ref().and_then(|l| l.defs().decisions.get(n)).map(|d| if d.name.is_empty() { d.id.clone() } else { d.name.clone() }).unwrap_or_default();
+                toggle(info_of(Cow::Owned(name), ic::DECISION, "Go to", s.doc), s.doc && self.decision() == n)
             }
             Cmd::PrevIssue => i("Previous issue", ic::UP, "Go", s.doc && s.table),
             Cmd::NextIssue => i("Next issue", ic::DOWN, "Go", s.doc && s.table),
@@ -452,7 +452,7 @@ impl App {
         if let Some(ed) = self.editing.take() {
             self.commit_editing(ed);
         }
-        let dec = self.decision;
+        let dec = self.decision();
         let act = |app: &mut App, a: Act| app.apply(ctx, vec![a]);
         match c {
             Cmd::Open => act(self, Act::Open),
@@ -479,7 +479,7 @@ impl App {
             }
             Cmd::Replace => self.shell.replace = Some(Replace { find: String::new(), with: String::new(), case: false, focus: true }),
             Cmd::InsertAbove | Cmd::InsertBelow | Cmd::Duplicate | Cmd::DeleteRule | Cmd::MoveUp | Cmd::MoveDown => {
-                let nrules = self.loaded.as_ref().and_then(|l| l.defs.table(dec)).map_or(0, |t| t.rules.len());
+                let nrules = self.loaded.as_ref().and_then(|l| l.defs().table(dec)).map_or(0, |t| t.rules.len());
                 let edit = match (c, self.selected) {
                     (Cmd::InsertAbove, Some(r)) => Edit::InsertRule { decision: dec, at: r, copy_of: None },
                     (Cmd::InsertBelow, sel) => Edit::InsertRule { decision: dec, at: sel.map_or(nrules, |r| r + 1), copy_of: None },
@@ -517,7 +517,7 @@ impl App {
             Cmd::RunTests => act(self, Act::View(View::Test)),
             Cmd::CopyReport => {
                 if let Some(l) = &self.loaded {
-                    ctx.copy_text(lint::report(&l.defs, &l.issues, &l.path.display().to_string()));
+                    ctx.copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
                     self.shell.notice = Some("Issues report copied".into());
                 }
             }
@@ -528,9 +528,9 @@ impl App {
     }
 
     fn save_as(&mut self) {
-        let Some(l) = self.loaded.as_ref().filter(|l| l.editable) else { return };
-        let mut dialog = rfd::FileDialog::new().add_filter("DMN", &["dmn", "xml"]).set_file_name(file_name(&l.path));
-        if let Some(dir) = l.path.parent() {
+        let Some(l) = self.loaded.as_ref().filter(|l| l.editable()) else { return };
+        let mut dialog = rfd::FileDialog::new().add_filter("DMN", &["dmn", "xml"]).set_file_name(file_name(l.path()));
+        if let Some(dir) = l.path().parent() {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else { return };
@@ -546,9 +546,9 @@ impl App {
 
     fn export(&mut self, f: Format) {
         let Some((text, name)) = self.loaded.as_ref().and_then(|l| {
-            let d = l.defs.decisions.get(self.decision)?;
+            let d = l.defs().decisions.get(self.decision())?;
             let name = if d.name.is_empty() { d.id.clone() } else { d.name.clone() };
-            Some((export::render(l.defs.table(self.decision)?, f), name))
+            Some((export::render(l.defs().table(self.decision())?, f), name))
         }) else {
             return;
         };
@@ -561,20 +561,20 @@ impl App {
     }
 
     fn copy_rule(&mut self) {
-        let table = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision));
+        let table = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision()));
         let Some(clip) = table.zip(self.selected).and_then(|(t, r)| rules::copy(t, r)) else { return };
         self.shell.clip = Some(clip);
         self.shell.notice = Some("Rule copied".into());
     }
 
     fn paste_rule(&mut self) {
-        let table = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision));
-        let Some((edits, at)) = table.zip(self.shell.clip.as_ref()).map(|(t, clip)| rules::paste(t, self.decision, self.selected, clip)) else { return };
+        let table = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision()));
+        let Some((edits, at)) = table.zip(self.shell.clip.as_ref()).map(|(t, clip)| rules::paste(t, self.decision(), self.selected, clip)) else { return };
         self.commit_group(edits, Some(at));
     }
 
     fn commit_group(&mut self, edits: Vec<Edit>, select: Option<usize>) -> bool {
-        let Some(l) = self.writable() else { return false };
+        let Some(l) = self.loaded.as_mut() else { return false };
         match l.commit(&edits) {
             Ok(changed) => {
                 if let (true, Some(r)) = (changed, select) {
@@ -584,7 +584,7 @@ impl App {
                 changed
             }
             Err(e) => {
-                self.error = Some(format!("Edit not applied: {e}"));
+                self.error = Some(e);
                 false
             }
         }
@@ -592,7 +592,7 @@ impl App {
 
     fn step_issue(&mut self, forward: bool) {
         let Some(l) = &self.loaded else { return };
-        match rules::next_issue(&l.issues, self.decision, self.selected, forward) {
+        match rules::next_issue(l.issues(), self.decision(), self.selected, forward) {
             Some(r) => {
                 self.selected = Some(r);
                 self.scroll_to = Some(r);
@@ -730,7 +730,7 @@ impl App {
 
     fn menu_go(&self, ui: &mut egui::Ui, s: &State, acts: &mut Vec<Act>) {
         ui.set_min_width(250.0);
-        let n = self.loaded.as_ref().map_or(0, |l| l.defs.decisions.len());
+        let n = self.loaded.as_ref().map_or(0, |l| l.defs().decisions.len());
         if n == 0 {
             ui.add_enabled(false, egui::Label::new("No file open"));
         }
@@ -836,7 +836,7 @@ impl App {
     }
 
     fn palette_items(&self, s: &State, query: &str) -> Vec<(Cmd, Info, i32)> {
-        let n_decisions = self.loaded.as_ref().map_or(0, |l| l.defs.decisions.len());
+        let n_decisions = self.loaded.as_ref().map_or(0, |l| l.defs().decisions.len());
         let dynamic = (0..n_decisions).map(Cmd::Go).chain((0..self.settings.recent.len()).map(Cmd::OpenRecent));
         let mut items: Vec<(Cmd, Info, i32)> = STATIC
             .iter()
@@ -933,8 +933,8 @@ impl App {
     }
 
     fn replace_edits(&self, f: &Replace) -> Vec<Edit> {
-        let table = self.loaded.as_ref().and_then(|l| l.defs.table(self.decision));
-        table.map_or_else(Vec::new, |t| rules::replace(t, self.decision, &f.find, &f.with, f.case))
+        let table = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision()));
+        table.map_or_else(Vec::new, |t| rules::replace(t, self.decision(), &f.find, &f.with, f.case))
     }
 
     pub fn replace_window(&mut self, ctx: &egui::Context) {
