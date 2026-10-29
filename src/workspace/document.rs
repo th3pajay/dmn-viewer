@@ -1,12 +1,10 @@
-//! The open DMN file and its edit history, kept apart from the egui view state.
-
-use dmn_viewer::diff::{self, Hunk, Spans};
-use dmn_viewer::edit::{Column, Edit};
-use dmn_viewer::fix;
-use dmn_viewer::lint::{self, Issue};
-use dmn_viewer::model::{DecisionLogic, Definitions};
-use dmn_viewer::parse;
-use dmn_viewer::unary::UnaryTests;
+use crate::diff::{self, Hunk, Spans};
+use crate::edit::{Column, Edit};
+use crate::fix;
+use crate::lint::{self, Issue};
+use crate::model::{DecisionLogic, Definitions};
+use crate::parse;
+use crate::unary::UnaryTests;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +16,6 @@ fn next_revision() -> u64 {
 
 pub const READ_ONLY: &str = "This file is not valid UTF-8, so it is open read-only: saving it could change bytes outside the edits.";
 
-/// A cell's value, so undo/redo of a cell edit can update the model without re-parsing.
 #[derive(Clone, Debug)]
 struct CellText {
     decision: usize,
@@ -27,8 +24,6 @@ struct CellText {
     text: String,
 }
 
-/// A reversible change to the XML: `text` goes at `at`, replacing the `len` bytes there.
-/// Only the changed span is kept, so undo memory grows with the edits, not the file size.
 struct Change {
     at: usize,
     len: usize,
@@ -46,9 +41,7 @@ pub struct Document {
     dirty: bool,
     undo: Vec<Change>,
     redo: Vec<Change>,
-    /// Where `xml` may differ from `saved`, for reviewing the changes before saving.
     spans: Spans,
-    /// Counts changes to `xml`, so views can tell when something derived from it is stale.
     revision: u64,
 }
 
@@ -72,7 +65,6 @@ impl Document {
         self.dirty
     }
 
-    /// Applies edits as one undo step. `Ok(false)` means they changed nothing; on error nothing changes.
     pub fn commit(&mut self, edits: &[Edit]) -> Result<bool, String> {
         let new = fix::apply(&self.xml, edits)?;
         if new == self.xml {
@@ -82,7 +74,6 @@ impl Document {
             [Edit::Cell { decision, rule, col, text }] => Some(CellText { decision: *decision, rule: *rule, col: *col, text: text.clone() }),
             _ => None,
         };
-        // A cell edit changes one entry's text and the line numbers after it; everything else is re-parsed.
         let defs = if cell.is_none() { Some(parse::parse(&new)?) } else { None };
         let before = cell.as_ref().map(|c| CellText { text: self.cell_text(c), ..c.clone() });
         let delta = self.record(new, before);
@@ -106,12 +97,10 @@ impl Document {
         delta
     }
 
-    /// How many steps undo can go back; a fix session undoes down to the depth it started at.
     pub fn undo_depth(&self) -> usize {
         self.undo.len()
     }
 
-    /// `Ok(false)` when there is nothing to undo. A parse error leaves the text undone but the model as it was.
     pub fn undo(&mut self) -> Result<bool, String> {
         self.travel(false)
     }
@@ -124,7 +113,6 @@ impl Document {
         self.travel(true)
     }
 
-    /// Reverts to the last saved text; undo brings the edits back.
     pub fn discard(&mut self) -> Result<(), String> {
         if !self.dirty {
             return Ok(());
@@ -146,7 +134,6 @@ impl Document {
         self.save().inspect_err(|_| self.path = old)
     }
 
-    /// The unsaved changes, oldest line first: compared only where edits happened since the last save.
     pub fn changes(&self) -> Vec<Hunk> {
         diff::hunks(&self.saved, &self.xml, &self.spans)
     }
@@ -203,8 +190,6 @@ impl Document {
         text.cloned().unwrap_or_default()
     }
 
-    /// What a full parse would produce after a cell's text changed: the entry's decoded text
-    /// (and compiled unary tests), and every later rule's line moved by `delta`.
     fn set_cell(&mut self, c: &CellText, delta: i64) {
         let text = c.text.replace("\r\n", "\n").replace('\r', "\n");
         for (d, dec) in self.defs.decisions.iter_mut().enumerate() {
@@ -253,7 +238,6 @@ mod tests {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/shipping-fees.dmn")).unwrap()
     }
 
-    /// The model and issues must be exactly what a fresh parse of the current text gives.
     fn assert_in_sync(doc: &Document) {
         let defs = parse::parse(&doc.xml).unwrap();
         assert_eq!(format!("{:?}", doc.defs), format!("{defs:?}"));
@@ -378,7 +362,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     }
 
-    /// Applying the hunks to the saved text must give the current text.
     fn replay(doc: &Document) -> String {
         let (saved, mut out, mut pos) = (doc.saved(), String::new(), 0);
         for h in doc.changes() {

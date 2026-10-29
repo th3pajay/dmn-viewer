@@ -12,3 +12,4 @@ pub mod session;
 pub mod suite;
 pub mod targets;
 pub mod unary;
+pub mod workspace;

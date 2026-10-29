@@ -1,7 +1,5 @@
 #![windows_subsystem = "windows"]
 
-mod document;
-mod fixing;
 mod menu;
 
 use dmn_viewer::diff::{self, Hunk};
@@ -13,10 +11,10 @@ use dmn_viewer::model::*;
 use dmn_viewer::session::TestSession;
 use dmn_viewer::suite::{self, Coverage};
 use dmn_viewer::unary::UnaryTests;
-use document::{Document, READ_ONLY};
+use dmn_viewer::workspace::document::{Document, READ_ONLY};
+use dmn_viewer::workspace::fixing::FixSession;
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, TextWrapMode, vec2};
 use egui_extras::{Column, TableBuilder};
-use fixing::FixSession;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

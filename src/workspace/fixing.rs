@@ -1,11 +1,8 @@
-//! A fix session: fixable issues offered one at a time, each applied only when confirmed.
-//! Every applied fix is one undo step; the session can undo its own fixes and no others.
-
-use crate::document::Document;
-use dmn_viewer::diff::{self, Hunk, Spans};
-use dmn_viewer::fix::{self, Candidate, Change, TestEffect};
-use dmn_viewer::parse;
-use dmn_viewer::suite::Suite;
+use super::document::Document;
+use crate::diff::{self, Hunk, Spans};
+use crate::fix::{self, Candidate, Change, TestEffect};
+use crate::parse;
+use crate::suite::Suite;
 use std::collections::HashSet;
 
 pub struct Applied {
@@ -15,21 +12,17 @@ pub struct Applied {
     key: String,
 }
 
-/// What the current step would change, computed once per issue and choice.
 pub struct Preview {
     for_step: (String, usize, usize),
     pub changes: Vec<Change>,
     pub tests: Option<TestEffect>,
-    /// The XML lines that change: (line, old text, new text).
     pub lines: Vec<(usize, String, String)>,
     pub error: Option<String>,
 }
 
 pub struct FixSession {
     start_depth: usize,
-    /// Only this issue (a Fix button on one issue), or every fixable one.
     only: Option<String>,
-    /// An undone fix's issue, offered again first.
     front: Option<String>,
     queue: Vec<Candidate>,
     pub choice: Option<usize>,
@@ -40,7 +33,6 @@ pub struct FixSession {
     preview: Option<Preview>,
 }
 
-/// Hunks and lines per hunk shown under "XML lines that change".
 const PREVIEW_HUNKS: usize = 12;
 const PREVIEW_LINES: usize = 12;
 
@@ -52,12 +44,10 @@ impl FixSession {
         s
     }
 
-    /// The issue on offer, or `None` in the summary.
     pub fn current(&self) -> Option<&Candidate> {
         if self.summary { None } else { self.queue.first() }
     }
 
-    /// The step's position: (this step, steps in total so far). The total changes as fixes resolve or reveal issues.
     pub fn progress(&self) -> (usize, usize) {
         let done = self.applied.len() + self.skipped_now.len();
         (done + 1, done + self.queue.len())
@@ -82,7 +72,6 @@ impl FixSession {
         });
     }
 
-    /// Applies the chosen fix. Refused (with the reason) when nothing is chosen.
     pub fn apply(&mut self, doc: &mut Document, skipped: &HashSet<String>) -> Result<(), String> {
         let Some(c) = self.current() else { return Err("There is no fix to apply.".into()) };
         let Some(f) = self.choice.and_then(|i| c.fixes.get(i)) else { return Err("This fix deletes something, so pick it yourself first.".into()) };
@@ -95,7 +84,6 @@ impl FixSession {
         Ok(())
     }
 
-    /// Skips the current issue until the file is reloaded.
     pub fn skip(&mut self, doc: &Document, skipped: &mut HashSet<String>) {
         let Some((title, key)) = self.current().map(|c| (c.issue.title(), c.key.clone())) else { return };
         self.skipped_now.push(title);
@@ -108,7 +96,6 @@ impl FixSession {
         self.summary = true;
     }
 
-    /// Undoes the last fix of this session; its issue comes back first.
     pub fn undo(&mut self, doc: &mut Document, skipped: &HashSet<String>) -> Result<bool, String> {
         if !self.can_undo(doc) {
             return Ok(false);
@@ -121,7 +108,6 @@ impl FixSession {
         Ok(true)
     }
 
-    /// Undoes every fix of this session and shows the summary.
     pub fn undo_all(&mut self, doc: &mut Document, skipped: &HashSet<String>) -> Result<(), String> {
         while self.can_undo(doc) {
             doc.undo()?;
@@ -134,7 +120,6 @@ impl FixSession {
         Ok(())
     }
 
-    /// After every change: rebuild the queue from the new issues; the summary opens when it is empty.
     pub fn settle(&mut self, doc: &Document, skipped: &HashSet<String>) {
         let before = self.queue.first().map(|c| c.key.clone());
         self.queue = fix::queue(&doc.defs, &doc.issues, skipped, self.front.as_deref(), self.only.as_deref());
@@ -149,7 +134,6 @@ impl FixSession {
         }
     }
 
-    /// What the chosen fix would change: from → to lines, the test effect and the XML lines.
     pub fn preview(&mut self, doc: &Document, suite: &Suite) -> Option<&Preview> {
         let c = self.current()?;
         let i = self.choice?;
@@ -204,7 +188,6 @@ mod tests {
         Document::open(p).unwrap()
     }
 
-    /// Rule 1 uses a value outside the allowed list; rule 3 is shadowed by the catch-all rule 2.
     fn messy(name: &str) -> Document {
         doc(name, &[(r#""LATAM""#, r#""A""#), ("-", r#""B""#), (r#""EU""#, r#""C""#)])
     }
@@ -224,7 +207,6 @@ mod tests {
         s.skip(&d, &mut skipped);
         assert!(s.summary && s.current().is_none());
         assert_eq!((s.applied.len(), s.skipped_now.clone()), (1, vec!["Unreachable rule"]));
-        // A new session does not offer the skipped issue again.
         let s2 = FixSession::start(&d, &skipped, None);
         assert!(s2.summary);
     }
@@ -247,8 +229,7 @@ mod tests {
     fn undo_brings_the_issue_back_first_and_stops_at_the_session_start() {
         let mut d = messy("undo.dmn");
         let skipped = HashSet::new();
-        // An edit from before the session.
-        d.commit(&[dmn_viewer::edit::Edit::Cell { decision: 0, rule: 2, col: dmn_viewer::edit::Column::Output(0), text: r#""D""#.into() }]).unwrap();
+        d.commit(&[crate::edit::Edit::Cell { decision: 0, rule: 2, col: crate::edit::Column::Output(0), text: r#""D""#.into() }]).unwrap();
         let start = d.xml.clone();
         let mut s = FixSession::start(&d, &skipped, None);
         let first = s.current().unwrap().key.clone();
