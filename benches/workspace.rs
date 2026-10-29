@@ -1,7 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use dmn_viewer::edit::{Column, Edit};
 use dmn_viewer::workspace::Workspace;
-use dmn_viewer::workspace::document::Document;
 use dmn_viewer::{lint, parse};
 use std::fmt::Write;
 use std::hint::black_box;
@@ -96,43 +95,43 @@ fn document(c: &mut Criterion) {
     g.bench_function("parse", |b| b.iter(|| black_box(parse::parse(black_box(&xml)).unwrap())));
     let defs = parse::parse(&xml).unwrap();
     g.bench_function("lint", |b| b.iter(|| black_box(lint::lint(black_box(&defs)))));
-    g.bench_function("open", |b| b.iter(|| black_box(Document::open(path.clone()).unwrap())));
+    g.bench_function("open", |b| b.iter(|| black_box(Workspace::open(path.clone()).unwrap())));
 
-    let mut doc = Document::open(path.clone()).unwrap();
+    let mut ws = Workspace::open(path.clone()).unwrap();
     let mut n = 0u64;
     g.bench_function("commit_cell_middle", |b| {
         b.iter(|| {
             n += 1;
-            black_box(doc.commit(&[cell(RULES / 2, n.to_string())]).unwrap())
+            black_box(ws.commit_group(&[cell(RULES / 2, n.to_string())], None))
         })
     });
 
-    let mut doc = Document::open(path.clone()).unwrap();
+    let mut ws = Workspace::open(path.clone()).unwrap();
     let mut flip = false;
     g.bench_function("commit_cell_first_shifting_lines", |b| {
         b.iter(|| {
             flip = !flip;
             let text = if flip { "1\n2" } else { "1" };
-            black_box(doc.commit(&[cell(0, text.to_string())]).unwrap())
+            black_box(ws.commit_group(&[cell(0, text.to_string())], None))
         })
     });
 
-    let mut doc = Document::open(path.clone()).unwrap();
+    let mut ws = Workspace::open(path.clone()).unwrap();
     g.bench_function("insert_rule_then_undo", |b| {
         b.iter(|| {
-            doc.commit(&[Edit::InsertRule { decision: 0, at: RULES / 2, copy_of: None }]).unwrap();
-            black_box(doc.undo().unwrap())
+            ws.commit_group(&[Edit::InsertRule { decision: 0, at: RULES / 2, copy_of: None }], None);
+            ws.undo();
         })
     });
 
-    let mut doc = Document::open(path).unwrap();
+    let mut ws = Workspace::open(path).unwrap();
     for i in 0..200 {
-        doc.commit(&[cell(i * 7, format!("{i}"))]).unwrap();
+        ws.commit_group(&[cell(i * 7, format!("{i}"))], None);
     }
     g.bench_function("undo_redo_cell", |b| {
         b.iter(|| {
-            doc.undo().unwrap();
-            black_box(doc.redo().unwrap())
+            ws.undo();
+            ws.redo();
         })
     });
     g.finish();
@@ -203,8 +202,7 @@ fn fixing(c: &mut Criterion) {
         b.iter(|| {
             ws.fix_reset_skipped();
             ws.fix_move(true);
-            let parts = ws.fix_parts().unwrap();
-            black_box(parts.session.preview(parts.doc, parts.suite).is_some());
+            black_box(ws.fix_view().is_some_and(|v| v.preview.is_some()));
         })
     });
     g.finish();

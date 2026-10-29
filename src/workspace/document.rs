@@ -66,22 +66,6 @@ impl Document {
         Ok(Document { path, saved: xml.clone(), xml, defs, issues, editable, dirty: false, undo: vec![], redo: vec![], spans: Spans::default(), revision: next_revision() })
     }
 
-    pub fn defs(&self) -> &Definitions {
-        &self.defs
-    }
-
-    pub fn issues(&self) -> &[Issue] {
-        &self.issues
-    }
-
-    pub fn xml(&self) -> &str {
-        &self.xml
-    }
-
-    pub fn editable(&self) -> bool {
-        self.editable
-    }
-
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }

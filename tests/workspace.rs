@@ -334,3 +334,97 @@ fn saving_clears_the_dirty_flag_and_a_failed_save_lands_in_the_error() {
     assert!(!ws.save_as(dir.join("missing-dir").join("x.dmn")));
     assert!(ws.error().is_some_and(|e| e.starts_with("Could not save")));
 }
+
+#[test]
+fn a_fix_session_applies_skips_and_ends_in_a_summary() {
+    let mut ws = messy("session.dmn");
+    assert!(ws.fix_view().is_none(), "no session, no view");
+    assert!(ws.fix_start(None));
+    let v = ws.fix_view().unwrap();
+    assert_eq!(v.progress, (1, 2));
+    assert_eq!(v.current.unwrap().issue.code, "NOT_IN_ALLOWED_VALUES");
+    assert_eq!(v.choice, Some(0));
+    assert!(!v.can_undo);
+
+    ws.fix_apply();
+    assert!(ws.xml().contains(r#""EU","NA","LATAM""#));
+    let v = ws.fix_view().unwrap();
+    assert_eq!(v.current.unwrap().issue.code, "UNREACHABLE_RULE");
+    assert_eq!(v.progress, (2, 2));
+    assert!(v.can_undo && v.dirty);
+
+    ws.fix_skip();
+    let v = ws.fix_view().unwrap();
+    assert!(v.current.is_none(), "an empty queue is the summary");
+    assert_eq!((v.applied.len(), v.skipped_now.to_vec(), v.skipped), (1, vec!["Unreachable rule"], 1));
+
+    ws.fix_close();
+    assert!(ws.fix_start(None));
+    assert!(ws.fix_view().unwrap().current.is_none(), "a skipped issue is not offered again");
+}
+
+#[test]
+fn a_fix_that_deletes_needs_a_choice_first() {
+    let mut ws = open("delete-fix.dmn", &[("-", r#""B""#), ("-", r#""B""#)]);
+    assert!(ws.fix_start(None));
+    let v = ws.fix_view().unwrap();
+    assert_eq!(v.current.unwrap().issue.code, "UNREACHABLE_RULE");
+    assert_eq!(v.choice, None);
+    assert!(v.preview.is_none());
+
+    ws.fix_apply();
+    assert!(ws.error().is_some_and(|e| e.starts_with("Fix not applied") && e.contains("pick it yourself")));
+    assert_eq!(ws.undo_depth(), 0);
+
+    ws.fix_move(true);
+    assert!(ws.fix_view().unwrap().preview.is_some());
+    ws.fix_apply();
+    assert_eq!((rules(&ws), ws.error()), (1, None), "a successful step clears the earlier fix error");
+}
+
+#[test]
+fn undo_brings_the_issue_back_first_and_stops_at_the_session_start() {
+    let mut ws = messy("fix-undo.dmn");
+    ws.commit(cell(2, "\"D\""));
+    let start = ws.xml().to_string();
+    assert!(ws.fix_start(None));
+    let first = ws.fix_view().unwrap().current.unwrap().key.clone();
+    ws.fix_apply();
+    ws.fix_apply();
+    assert!(ws.fix_view().unwrap().current.is_none());
+
+    ws.fix_undo();
+    let v = ws.fix_view().unwrap();
+    assert_eq!(v.current.unwrap().issue.code, "UNREACHABLE_RULE", "the last fix's issue comes back first");
+    ws.fix_undo();
+    assert_eq!(ws.fix_view().unwrap().current.unwrap().key, first);
+    assert_eq!(ws.xml(), start);
+    ws.fix_undo();
+    assert!(output(&ws, 2).contains('D'), "the edit from before the session stays");
+    assert!(!ws.fix_view().unwrap().can_undo);
+
+    ws.fix_apply();
+    ws.fix_undo_all();
+    let v = ws.fix_view().unwrap();
+    assert!(v.current.is_none() && v.undone_all && v.applied.is_empty());
+    assert_eq!(ws.xml(), start);
+}
+
+#[test]
+fn a_one_issue_session_previews_its_change_and_ends_after_it() {
+    let mut ws = messy("one-issue.dmn");
+    let key = ws.issues().iter().find(|i| i.code == "UNREACHABLE_RULE").and_then(|i| ws.fixable_key(i)).unwrap();
+    assert!(ws.fix_start(Some(key)));
+    let v = ws.fix_view().unwrap();
+    assert_eq!(v.progress, (1, 1));
+    let p = v.preview.unwrap();
+    assert!(p.error.is_none() && p.tests.is_none());
+    assert_eq!(p.changes[0].place, "Rule 3");
+    assert!(!p.lines.is_empty());
+    let first = p as *const _;
+    let again = ws.fix_view().unwrap().preview.unwrap() as *const _;
+    assert_eq!(first, again, "an unchanged step keeps its preview");
+
+    ws.fix_apply();
+    assert!(ws.fix_view().unwrap().current.is_none(), "one issue, then the summary");
+}

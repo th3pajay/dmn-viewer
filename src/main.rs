@@ -10,9 +10,7 @@ use dmn_viewer::lint::{self, Column as Col, Issue, Severity};
 use dmn_viewer::model::*;
 use dmn_viewer::suite::{self, Coverage};
 use dmn_viewer::unary::UnaryTests;
-use dmn_viewer::workspace::document::Document;
-use dmn_viewer::workspace::fixing::FixSession;
-use dmn_viewer::workspace::{Cursor, Editing, View, Workspace};
+use dmn_viewer::workspace::{Cursor, Editing, FixView, View, Workspace};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, TextWrapMode, vec2};
 use egui_extras::{Column, TableBuilder};
 use std::path::{Path, PathBuf};
@@ -1804,17 +1802,17 @@ fn note(ui: &mut egui::Ui, bg: Color32, fg: Color32, text: impl Into<String>) {
 }
 
 /// The fix session's panel: the current step (options, from → to, test effect, XML lines) or the summary.
-fn fix_panel(ui: &mut egui::Ui, t: &Theme, s: &mut FixSession, doc: &Document, suite: &suite::Suite, skipped: usize, acts: &mut Vec<Act>) {
+fn fix_panel(ui: &mut egui::Ui, t: &Theme, v: &FixView, acts: &mut Vec<Act>) {
     let warn_bg = t.warn.gamma_multiply(if t.dark { 0.25 } else { 0.15 });
     let error_bg = if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) };
     egui::ScrollArea::vertical().id_salt("fix_panel").auto_shrink([false, false]).show(ui, |ui| {
         Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let Some(c) = s.current().cloned() else {
-                summary_panel(ui, t, s, doc, skipped, acts);
+            let Some(c) = v.current else {
+                summary_panel(ui, t, v, acts);
                 return;
             };
-            let (n, total) = s.progress();
+            let (n, total) = v.progress;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Fix {n} of ~{total}")).size(12.0).color(t.muted));
                 dot(ui, t.sev(c.issue.severity), 7.0);
@@ -1828,7 +1826,7 @@ fn fix_panel(ui: &mut egui::Ui, t: &Theme, s: &mut FixSession, doc: &Document, s
             }
             ui.add_space(8.0);
             for (i, f) in c.fixes.iter().enumerate() {
-                let on = s.choice == Some(i);
+                let on = v.choice == Some(i);
                 let (stroke, fill) = match (on, f.destructive) {
                     (true, true) => (t.error, error_bg),
                     (true, false) => (t.accent, t.accent_soft),
@@ -1860,9 +1858,9 @@ fn fix_panel(ui: &mut egui::Ui, t: &Theme, s: &mut FixSession, doc: &Document, s
                 }
                 ui.add_space(4.0);
             }
-            let destructive = s.choice.and_then(|i| c.fixes.get(i)).filter(|f| f.destructive).map(|f| f.label.clone());
+            let destructive = v.choice.and_then(|i| c.fixes.get(i)).filter(|f| f.destructive).map(|f| f.label.clone());
             ui.add_space(4.0);
-            match s.preview(doc, suite) {
+            match v.preview {
                 None => note(ui, error_bg, t.error_text, "This fix deletes something, so nothing is selected. Pick it yourself if you want it."),
                 Some(p) => {
                     for ch in &p.changes {
@@ -1929,7 +1927,7 @@ fn fix_panel(ui: &mut egui::Ui, t: &Theme, s: &mut FixSession, doc: &Document, s
             });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                let can = s.can_undo(doc);
+                let can = v.can_undo;
                 if ui.add_enabled(can, egui::Button::new(RichText::new("Undo last fix").size(12.0))).on_hover_text("Ctrl+Z").clicked() {
                     acts.push(Act::FixUndo);
                 }
@@ -1941,16 +1939,16 @@ fn fix_panel(ui: &mut egui::Ui, t: &Theme, s: &mut FixSession, doc: &Document, s
     });
 }
 
-fn summary_panel(ui: &mut egui::Ui, t: &Theme, s: &FixSession, doc: &Document, skipped: usize, acts: &mut Vec<Act>) {
+fn summary_panel(ui: &mut egui::Ui, t: &Theme, v: &FixView, acts: &mut Vec<Act>) {
     ui.label(bold("Fix summary", 15.0).color(t.text));
     ui.add_space(6.0);
-    if s.applied.is_empty() {
-        let text = if s.undone_all { "Every fix from this session was undone." } else { "No fixes applied." };
+    if v.applied.is_empty() {
+        let text = if v.undone_all { "Every fix from this session was undone." } else { "No fixes applied." };
         ui.label(RichText::new(text).color(t.muted));
     } else {
-        ui.label(RichText::new(format!("{} applied, not saved yet", s.applied.len())).size(12.5).color(t.text));
+        ui.label(RichText::new(format!("{} applied, not saved yet", v.applied.len())).size(12.5).color(t.text));
         ui.add_space(6.0);
-        for a in &s.applied {
+        for a in v.applied {
             ui.horizontal_wrapped(|ui| {
                 ui.label(bold(a.title, 12.5).color(t.text));
                 ui.label(RichText::new(&a.label).size(12.0).color(t.muted));
@@ -1961,19 +1959,19 @@ fn summary_panel(ui: &mut egui::Ui, t: &Theme, s: &FixSession, doc: &Document, s
             ui.add_space(4.0);
         }
     }
-    if !s.skipped_now.is_empty() {
+    if !v.skipped_now.is_empty() {
         ui.add_space(4.0);
-        ui.add(egui::Label::new(RichText::new(format!("Skipped: {}", s.skipped_now.join(", "))).size(12.0).color(t.muted)).wrap());
+        ui.add(egui::Label::new(RichText::new(format!("Skipped: {}", v.skipped_now.join(", "))).size(12.0).color(t.muted)).wrap());
     }
-    if skipped > 0 && ui.link(RichText::new(format!("Show {skipped} skipped issue{} again", if skipped == 1 { "" } else { "s" })).size(12.0)).clicked() {
+    if v.skipped > 0 && ui.link(RichText::new(format!("Show {} skipped issue{} again", v.skipped, if v.skipped == 1 { "" } else { "s" })).size(12.0)).clicked() {
         acts.push(Act::FixResetSkipped);
     }
     ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
-        if ui.add_enabled(s.can_undo(doc), egui::Button::new("Undo all fixes")).clicked() {
+        if ui.add_enabled(v.can_undo, egui::Button::new("Undo all fixes")).clicked() {
             acts.push(Act::FixUndoAll);
         }
-        if doc.dirty() && button(ui, t, ic::SEARCH, "Review & save", true).clicked() {
+        if v.dirty && button(ui, t, ic::SEARCH, "Review & save", true).clicked() {
             acts.push(Act::FixReview);
         }
         if button(ui, t, ic::X, "Close", false).on_hover_text("Esc. Each fix stays one Ctrl+Z step.").clicked() {
@@ -2237,7 +2235,7 @@ impl eframe::App for App {
         }
         // Fix session keys, when no text box has focus: Enter apply, S skip, Esc stop, arrows choose.
         if self.is_fixing() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
-            let step = self.loaded.as_ref().and_then(|l| l.fixing()).is_some_and(|s| s.current().is_some());
+            let step = self.loaded.as_ref().is_some_and(|l| l.fix_offering());
             let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
             if step {
                 if key(egui::Key::Enter) {
@@ -2335,12 +2333,8 @@ impl eframe::App for App {
 
         egui::Panel::top("header").exact_size(60.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::symmetric(20, 0))).show(ui, |ui| self.header(ui, &mut acts));
 
-        if let Some(p) = self.loaded.as_mut().and_then(|l| l.fix_parts()) {
-            egui::Panel::right("fix_panel")
-                .resizable(true)
-                .default_size(400.0)
-                .frame(Frame::new().fill(t.surface).inner_margin(Margin::same(0)))
-                .show(ui, |ui| fix_panel(ui, &t, p.session, p.doc, p.suite, p.skipped, &mut acts));
+        if let Some(v) = self.loaded.as_mut().and_then(|l| l.fix_view()) {
+            egui::Panel::right("fix_panel").resizable(true).default_size(400.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::same(0))).show(ui, |ui| fix_panel(ui, &t, &v, &mut acts));
         }
 
         match self.view() {

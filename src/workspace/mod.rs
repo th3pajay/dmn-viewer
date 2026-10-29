@@ -1,24 +1,24 @@
-pub mod document;
-pub mod fixing;
+mod document;
+mod fixing;
 mod rules;
 
 use crate::diff::Hunk;
 use crate::edit::Edit;
 use crate::eval::Outcome;
 use crate::export::{self, Format};
-use crate::fix;
 use crate::lint::{Column, Issue};
 use crate::model::{Definitions, Rule};
 use crate::session::TestSession;
 use crate::suite::{self, CaseResult, Coverage, Suite};
 use document::Document;
-use fixing::FixSession;
-use std::cell::{Ref, RefCell};
+use fixing::{FixSession, Fixable};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use document::READ_ONLY;
+pub use fixing::{Applied, FixView, Preview};
 pub use rules::RuleClip;
 
 const FIXING: &str = "The table is read-only while fixes are being reviewed. Stop the fix session to edit it.";
@@ -56,14 +56,6 @@ pub enum RuleOp {
     MoveDown,
 }
 
-struct Fixable {
-    revision: u64,
-    skip_gen: u64,
-    keys: HashSet<String>,
-    ids: fix::Keys,
-    open: usize,
-}
-
 pub struct Workspace {
     doc: Document,
     decision: usize,
@@ -87,13 +79,6 @@ pub struct Tests<'a> {
     pub defs: &'a Definitions,
     pub path: &'a Path,
     decision: usize,
-}
-
-pub struct FixParts<'a> {
-    pub session: &'a mut FixSession,
-    pub doc: &'a Document,
-    pub suite: &'a Suite,
-    pub skipped: usize,
 }
 
 impl Workspace {
@@ -476,164 +461,6 @@ impl Workspace {
     pub fn tests(&mut self) -> Tests<'_> {
         self.session.sync(self.doc.revision());
         Tests { session: &mut self.session, defs: &self.doc.defs, path: self.doc.path(), decision: self.decision }
-    }
-
-    pub fn fixing(&self) -> Option<&FixSession> {
-        self.fixing.as_ref()
-    }
-
-    pub fn is_fixing(&self) -> bool {
-        self.fixing.is_some()
-    }
-
-    pub fn fix_parts(&mut self) -> Option<FixParts<'_>> {
-        let session = self.fixing.as_mut()?;
-        Some(FixParts { session, doc: &self.doc, suite: self.session.suite(), skipped: self.skipped.len() })
-    }
-
-    pub fn skipped_count(&self) -> usize {
-        self.skipped.len()
-    }
-
-    pub fn is_skipped(&self, key: &str) -> bool {
-        self.skipped.contains(key)
-    }
-
-    fn fresh(&self) -> Ref<'_, Fixable> {
-        let stale = self.fixable.borrow().as_ref().is_none_or(|f| f.revision != self.doc.revision() || f.skip_gen != self.skip_gen);
-        if stale {
-            let ids = fix::Keys::new(&self.doc.defs);
-            let keys: HashSet<String> =
-                if self.doc.editable { fix::queue_with(&ids, &self.doc.defs, &self.doc.issues, &HashSet::new(), None, None).into_iter().map(|c| c.key).collect() } else { HashSet::new() };
-            let open = keys.iter().filter(|k| !self.skipped.contains(*k)).count();
-            *self.fixable.borrow_mut() = Some(Fixable { revision: self.doc.revision(), skip_gen: self.skip_gen, keys, ids, open });
-        }
-        Ref::map(self.fixable.borrow(), |f| f.as_ref().expect("filled above"))
-    }
-
-    pub fn fixable_count(&self) -> usize {
-        self.fresh().open
-    }
-
-    pub fn fixable_key(&self, issue: &Issue) -> Option<String> {
-        let fresh = self.fresh();
-        let key = fresh.ids.key(&self.doc.defs, issue);
-        fresh.keys.contains(&key).then_some(key)
-    }
-
-    fn follow_fix(&mut self) {
-        let Some((decision, rule)) = self.fixing.as_ref().and_then(|s| s.current()).map(|c| (c.issue.decision, c.issue.rules.iter().min().copied())) else { return };
-        if let Some(d) = decision {
-            self.set_decision(d);
-        }
-        self.reveal(rule);
-    }
-
-    fn fix_step(&mut self, step: impl FnOnce(&mut Self) -> Result<(), String>) {
-        self.flush_editing();
-        match step(self) {
-            Ok(()) => {
-                if self.error.as_deref().is_some_and(|e| e.starts_with(FIX_FAILED)) {
-                    self.error = None;
-                }
-            }
-            Err(e) => self.error = Some(format!("{FIX_FAILED}: {e}")),
-        }
-        self.follow_fix();
-        self.clamp();
-    }
-
-    pub fn fix_start(&mut self, only: Option<String>) -> bool {
-        let mut started = false;
-        self.fix_step(|ws| {
-            if ws.fixing.is_some() {
-                return Ok(());
-            }
-            if !ws.doc.editable {
-                return Err(READ_ONLY.into());
-            }
-            ws.fixing = Some(FixSession::start(&ws.doc, &ws.skipped, only));
-            ws.view = View::Rules;
-            started = true;
-            Ok(())
-        });
-        started
-    }
-
-    pub fn fix_choose(&mut self, i: usize) {
-        self.fix_step(|ws| {
-            if let Some(s) = ws.fixing.as_mut() {
-                s.choose(i);
-            }
-            Ok(())
-        });
-    }
-
-    pub fn fix_move(&mut self, down: bool) {
-        self.fix_step(|ws| {
-            if let Some(s) = ws.fixing.as_mut() {
-                s.move_choice(down);
-            }
-            Ok(())
-        });
-    }
-
-    pub fn fix_apply(&mut self) {
-        self.fix_step(|ws| match ws.fixing.as_mut() {
-            Some(s) => s.apply(&mut ws.doc, &ws.skipped),
-            None => Ok(()),
-        });
-    }
-
-    pub fn fix_skip(&mut self) {
-        self.fix_step(|ws| {
-            if let Some(s) = ws.fixing.as_mut() {
-                s.skip(&ws.doc, &mut ws.skipped);
-                ws.skip_gen += 1;
-            }
-            Ok(())
-        });
-    }
-
-    pub fn fix_stop(&mut self) {
-        self.fix_step(|ws| {
-            if let Some(s) = ws.fixing.as_mut() {
-                s.stop();
-            }
-            Ok(())
-        });
-    }
-
-    pub fn fix_undo(&mut self) {
-        self.fix_step(|ws| match ws.fixing.as_mut() {
-            Some(s) => s.undo(&mut ws.doc, &ws.skipped).map(|_| ()),
-            None => Ok(()),
-        });
-    }
-
-    pub fn fix_undo_all(&mut self) {
-        self.fix_step(|ws| match ws.fixing.as_mut() {
-            Some(s) => s.undo_all(&mut ws.doc, &ws.skipped),
-            None => Ok(()),
-        });
-    }
-
-    pub fn fix_reset_skipped(&mut self) {
-        self.fix_step(|ws| {
-            ws.skipped.clear();
-            ws.skip_gen += 1;
-            if let Some(s) = ws.fixing.as_mut() {
-                s.settle(&ws.doc, &ws.skipped);
-            }
-            Ok(())
-        });
-    }
-
-    pub fn fix_close(&mut self) {
-        self.fix_step(|ws| {
-            ws.fixing = None;
-            Ok(())
-        });
     }
 }
 
