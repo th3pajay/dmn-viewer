@@ -1,8 +1,7 @@
 use crate::{Act, App, Pending, View, bold, hex, ic, small_button};
-use dmn_viewer::edit::Edit;
-use dmn_viewer::export::{self, Format};
+use dmn_viewer::export::Format;
 use dmn_viewer::lint;
-use dmn_viewer::rules::{self, RuleClip};
+use dmn_viewer::workspace::RuleOp;
 use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, RichText, Sense, Stroke, vec2};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -279,7 +278,6 @@ pub struct Shell {
     palette: Option<Palette>,
     replace: Option<Replace>,
     help: Option<Help>,
-    clip: Option<RuleClip>,
     notice: Option<String>,
     pub focus_filter: bool,
     hide_nav: bool,
@@ -338,13 +336,13 @@ impl App {
             locked: self.review.is_some() || self.is_fixing(),
             table: l.and_then(|l| l.defs().table(self.decision())).is_some(),
             nrules: l.and_then(|l| l.defs().table(self.decision())).map_or(0, |t| t.rules.len()),
-            selected: self.selected,
+            selected: self.selected(),
             can_undo: l.is_some_and(|l| l.undo_depth() > 0),
             can_redo: l.is_some_and(|l| l.can_redo()),
             fixable: l.map_or(0, |l| l.fixable_count()),
             skipped: l.map_or(0, |l| l.skipped_count()),
-            has_clip: self.shell.clip.is_some(),
-            view: self.view,
+            has_clip: l.is_some_and(|l| l.has_clip()),
+            view: self.view(),
             dark: self.theme.dark,
             compact: self.settings.compact,
             sidebar: self.shell.show_nav(),
@@ -449,10 +447,10 @@ impl App {
 
     pub fn run_cmd(&mut self, ctx: &egui::Context, c: Cmd) {
         self.shell.notice = None;
-        if let Some(ed) = self.editing.take() {
-            self.commit_editing(ed);
+        if let Some(l) = self.loaded.as_mut() {
+            l.clear_notice();
+            l.flush_editing();
         }
-        let dec = self.decision();
         let act = |app: &mut App, a: Act| app.apply(ctx, vec![a]);
         match c {
             Cmd::Open => act(self, Act::Open),
@@ -466,7 +464,11 @@ impl App {
                 self.settings.save();
             }
             Cmd::Reload => act(self, Act::Reload),
-            Cmd::Revert => self.discard(),
+            Cmd::Revert => {
+                if let Some(l) = self.loaded.as_mut() {
+                    l.discard();
+                }
+            }
             Cmd::Save => act(self, Act::Save),
             Cmd::SaveAs => self.save_as(),
             Cmd::Export(f) => self.export(f),
@@ -474,25 +476,35 @@ impl App {
             Cmd::Undo => act(self, Act::Undo),
             Cmd::Redo => act(self, Act::Redo),
             Cmd::Find => {
-                self.view = View::Rules;
+                if let Some(l) = self.loaded.as_mut() {
+                    l.set_view(View::Rules);
+                }
                 self.shell.focus_filter = true;
             }
             Cmd::Replace => self.shell.replace = Some(Replace { find: String::new(), with: String::new(), case: false, focus: true }),
             Cmd::InsertAbove | Cmd::InsertBelow | Cmd::Duplicate | Cmd::DeleteRule | Cmd::MoveUp | Cmd::MoveDown => {
-                let nrules = self.loaded.as_ref().and_then(|l| l.defs().table(dec)).map_or(0, |t| t.rules.len());
-                let edit = match (c, self.selected) {
-                    (Cmd::InsertAbove, Some(r)) => Edit::InsertRule { decision: dec, at: r, copy_of: None },
-                    (Cmd::InsertBelow, sel) => Edit::InsertRule { decision: dec, at: sel.map_or(nrules, |r| r + 1), copy_of: None },
-                    (Cmd::Duplicate, Some(r)) => Edit::InsertRule { decision: dec, at: r + 1, copy_of: Some(r) },
-                    (Cmd::DeleteRule, Some(r)) => Edit::DeleteRule { decision: dec, rule: r },
-                    (Cmd::MoveUp, Some(r)) if r > 0 => Edit::MoveRule { decision: dec, from: r, to: r - 1 },
-                    (Cmd::MoveDown, Some(r)) if r + 1 < nrules => Edit::MoveRule { decision: dec, from: r, to: r + 1 },
-                    _ => return,
+                let op = match c {
+                    Cmd::InsertAbove => RuleOp::InsertAbove,
+                    Cmd::InsertBelow => RuleOp::InsertBelow,
+                    Cmd::Duplicate => RuleOp::Duplicate,
+                    Cmd::DeleteRule => RuleOp::Delete,
+                    Cmd::MoveUp => RuleOp::MoveUp,
+                    _ => RuleOp::MoveDown,
                 };
-                self.commit(edit);
+                if let Some(l) = self.loaded.as_mut() {
+                    l.rule_op(op);
+                }
             }
-            Cmd::CopyRule => self.copy_rule(),
-            Cmd::PasteRule => self.paste_rule(),
+            Cmd::CopyRule => {
+                if let Some(l) = self.loaded.as_mut() {
+                    l.copy_rule();
+                }
+            }
+            Cmd::PasteRule => {
+                if let Some(l) = self.loaded.as_mut() {
+                    l.paste_rule();
+                }
+            }
             Cmd::Show(v) => act(self, Act::View(v)),
             Cmd::ZoomIn => ctx.set_zoom_factor((ctx.zoom_factor() * 1.1).min(3.0)),
             Cmd::ZoomOut => ctx.set_zoom_factor((ctx.zoom_factor() / 1.1).max(0.5)),
@@ -510,8 +522,16 @@ impl App {
                 self.settings.save();
             }
             Cmd::Go(n) => act(self, Act::Decision(n)),
-            Cmd::PrevIssue => self.step_issue(false),
-            Cmd::NextIssue => self.step_issue(true),
+            Cmd::PrevIssue => {
+                if let Some(l) = self.loaded.as_mut() {
+                    l.step_issue(false);
+                }
+            }
+            Cmd::NextIssue => {
+                if let Some(l) = self.loaded.as_mut() {
+                    l.step_issue(true);
+                }
+            }
             Cmd::FixIssues => act(self, Act::FixStart(None)),
             Cmd::ResetSkipped => act(self, Act::FixResetSkipped),
             Cmd::RunTests => act(self, Act::View(View::Test)),
@@ -535,70 +555,19 @@ impl App {
         }
         let Some(path) = dialog.save_file() else { return };
         let Some(l) = self.loaded.as_mut() else { return };
-        match l.save_as(path.clone()) {
-            Ok(()) => {
-                self.shell.notice = Some(format!("Saved as {}", file_name(&path)));
-                self.remember(path);
-            }
-            Err(e) => self.error = Some(e),
+        if l.save_as(path.clone()) {
+            self.shell.notice = Some(format!("Saved as {}", file_name(&path)));
+            self.remember(path);
         }
     }
 
     fn export(&mut self, f: Format) {
-        let Some((text, name)) = self.loaded.as_ref().and_then(|l| {
-            let d = l.defs().decisions.get(self.decision())?;
-            let name = if d.name.is_empty() { d.id.clone() } else { d.name.clone() };
-            Some((export::render(l.defs().table(self.decision())?, f), name))
-        }) else {
-            return;
-        };
+        let Some((name, text)) = self.loaded.as_ref().and_then(|l| l.export(f)) else { return };
         let safe: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' }).collect();
         let Some(path) = rfd::FileDialog::new().add_filter(f.label(), &[f.extension()]).set_file_name(format!("{safe}.{}", f.extension())).save_file() else { return };
         match std::fs::write(&path, text) {
             Ok(()) => self.shell.notice = Some(format!("Exported {}", file_name(&path))),
             Err(e) => self.error = Some(format!("Could not write {}: {e}", path.display())),
-        }
-    }
-
-    fn copy_rule(&mut self) {
-        let table = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision()));
-        let Some(clip) = table.zip(self.selected).and_then(|(t, r)| rules::copy(t, r)) else { return };
-        self.shell.clip = Some(clip);
-        self.shell.notice = Some("Rule copied".into());
-    }
-
-    fn paste_rule(&mut self) {
-        let table = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision()));
-        let Some((edits, at)) = table.zip(self.shell.clip.as_ref()).map(|(t, clip)| rules::paste(t, self.decision(), self.selected, clip)) else { return };
-        self.commit_group(edits, Some(at));
-    }
-
-    fn commit_group(&mut self, edits: Vec<Edit>, select: Option<usize>) -> bool {
-        let Some(l) = self.loaded.as_mut() else { return false };
-        match l.commit(&edits) {
-            Ok(changed) => {
-                if let (true, Some(r)) = (changed, select) {
-                    self.selected = Some(r);
-                    self.scroll_to = Some(r);
-                }
-                changed
-            }
-            Err(e) => {
-                self.error = Some(e);
-                false
-            }
-        }
-    }
-
-    fn step_issue(&mut self, forward: bool) {
-        let Some(l) = &self.loaded else { return };
-        match rules::next_issue(l.issues(), self.decision(), self.selected, forward) {
-            Some(r) => {
-                self.selected = Some(r);
-                self.scroll_to = Some(r);
-                self.view = View::Rules;
-            }
-            None => self.shell.notice = Some("No issues on a rule in this decision".into()),
         }
     }
 
@@ -819,7 +788,7 @@ impl App {
     }
 
     pub fn notice_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(text) = self.shell.notice.clone() else { return };
+        let Some(text) = self.loaded.as_ref().and_then(|l| l.notice()).map(str::to_string).or_else(|| self.shell.notice.clone()) else { return };
         let t = self.theme;
         let mut dismissed = false;
         egui::Panel::top("notice").frame(Frame::new().fill(t.accent_soft).inner_margin(Margin::symmetric(20, 6))).show(ui, |ui| {
@@ -832,6 +801,9 @@ impl App {
         });
         if dismissed {
             self.shell.notice = None;
+            if let Some(l) = self.loaded.as_mut() {
+                l.clear_notice();
+            }
         }
     }
 
@@ -932,15 +904,10 @@ impl App {
         }
     }
 
-    fn replace_edits(&self, f: &Replace) -> Vec<Edit> {
-        let table = self.loaded.as_ref().and_then(|l| l.defs().table(self.decision()));
-        table.map_or_else(Vec::new, |t| rules::replace(t, self.decision(), &f.find, &f.with, f.case))
-    }
-
     pub fn replace_window(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.shell.replace.take() else { return };
         let t = self.theme;
-        let edits = self.replace_edits(&f);
+        let matches = self.loaded.as_ref().map_or(0, |l| l.replace_count(&f.find, &f.with, f.case));
         let mut open = true;
         let mut apply = false;
         egui::Window::new("Find and replace").collapsible(false).resizable(false).open(&mut open).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
@@ -957,20 +924,18 @@ impl App {
             });
             ui.checkbox(&mut f.case, "Match case");
             ui.add_space(4.0);
-            let summary =
-                if f.find.is_empty() { "Searches every input and output cell of this decision.".to_string() } else { format!("{} cell{} match", edits.len(), if edits.len() == 1 { "" } else { "s" }) };
+            let summary = if f.find.is_empty() { "Searches every input and output cell of this decision.".to_string() } else { format!("{matches} cell{} match", if matches == 1 { "" } else { "s" }) };
             ui.label(RichText::new(summary).color(t.muted));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.add_enabled_ui(!edits.is_empty(), |ui| {
+                ui.add_enabled_ui(matches > 0, |ui| {
                     if crate::button(ui, &t, ic::REPLACE, "Replace all", true).clicked() {
                         apply = true;
                     }
                 });
             });
         });
-        if apply && self.commit_group(edits, None) {
-            self.shell.notice = Some("Replaced in this decision. Undo reverts all of it at once".into());
+        if apply && self.loaded.as_mut().is_some_and(|l| l.replace_all(&f.find, &f.with, f.case)) {
             open = false;
         }
         if open {

@@ -158,7 +158,7 @@ fn session(c: &mut Criterion) {
     g.bench_function("edit_then_frame", |b| {
         b.iter(|| {
             n += 1;
-            ws.commit(&[cell(RULES / 2, n.to_string())]).unwrap();
+            ws.commit_group(&[cell(RULES / 2, n.to_string())], None);
             black_box(ws.tests().outcome());
             black_box(ws.tests().results());
             black_box(ws.tests().coverage());

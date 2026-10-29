@@ -139,12 +139,12 @@ fn results_follow_document_edits_without_any_sync_call() {
     assert!(Arc::ptr_eq(&before, &ws.tests().results().unwrap()), "no edit, same run");
     assert!(before[0].pass);
 
-    assert!(ws.commit(&[cell(0, "999")]).unwrap());
+    assert!(ws.commit_group(&[cell(0, "999")], None));
     let after = ws.tests().results().unwrap();
     assert!(!Arc::ptr_eq(&before, &after), "an edit forces a re-run");
     assert!(!after[0].pass, "the first case expects the old fee");
 
-    assert!(ws.undo().unwrap());
+    ws.undo();
     assert!(ws.tests().results().unwrap()[0].pass, "undo brings the old result back");
 }
 
@@ -154,7 +154,7 @@ fn the_live_outcome_follows_document_edits() {
     set_fields(&mut ws, fields("\"EU\"", "2.5", "false", "\"20260314\""));
     let a = ws.tests().outcome().unwrap();
     assert!(Arc::ptr_eq(&a, &ws.tests().outcome().unwrap()));
-    ws.commit(&[cell(0, "999")]).unwrap();
+    ws.commit_group(&[cell(0, "999")], None);
     let b = ws.tests().outcome().unwrap();
     assert!(!Arc::ptr_eq(&a, &b), "an edit forces a re-evaluation");
     assert_ne!(a.rows, b.rows);
@@ -174,7 +174,7 @@ fn coverage_is_cached_with_the_results_and_follows_cases_and_edits() {
     assert!(!Arc::ptr_eq(&a, &b));
     assert_eq!(b.fired_by[0], (0, 0), "both rule-1 cases are gone");
 
-    ws.commit(&[cell(0, "999")]).unwrap();
+    ws.commit_group(&[cell(0, "999")], None);
     assert!(!Arc::ptr_eq(&b, &ws.tests().coverage().unwrap()), "an edit forces a re-run");
 }
 
