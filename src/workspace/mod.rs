@@ -498,7 +498,12 @@ impl Tests<'_> {
     }
 
     pub fn coverage(&mut self) -> Option<Arc<Coverage>> {
-        self.session.coverage(self.defs, self.decision)
+        let defs = self.defs;
+        let suite = self.session.suite();
+        if suite.cases.is_empty() || !defs.decisions.get(self.decision).is_some_and(|d| suite::targets(&suite.decision, d)) {
+            return None;
+        }
+        self.session.coverage(defs, self.decision)
     }
 
     pub fn add_case(&mut self, name: &str) {

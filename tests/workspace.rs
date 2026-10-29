@@ -428,3 +428,25 @@ fn a_one_issue_session_previews_its_change_and_ends_after_it() {
     ws.fix_apply();
     assert!(ws.fix_view().unwrap().current.is_none(), "one issue, then the summary");
 }
+
+#[test]
+fn coverage_exists_only_for_a_suite_about_the_active_decision() {
+    let mut ws = clean("coverage-target.dmn");
+    let case = r#"{"name":"x","inputs":{"Region":"EU"}}"#;
+    let other = scratch("other.tests.json", format!(r#"{{"decision":"Other","cases":[{case}]}}"#).as_bytes());
+    let named = scratch("named.tests.json", format!(r#"{{"decision":"Dec","cases":[{case}]}}"#).as_bytes());
+    let any = scratch("any.tests.json", format!(r#"{{"cases":[{case}]}}"#).as_bytes());
+    let empty = scratch("empty.tests.json", br#"{"decision":"Dec","cases":[]}"#);
+
+    let mut tests = ws.tests();
+    assert!(tests.coverage().is_none(), "no cases, no coverage");
+    tests.load(&other).unwrap();
+    assert!(tests.results().is_some(), "results are shown for any loaded suite");
+    assert!(tests.coverage().is_none(), "but coverage only for a suite about this decision");
+    tests.load(&named).unwrap();
+    assert_eq!(tests.coverage().unwrap().total(), 3);
+    tests.load(&any).unwrap();
+    assert!(tests.coverage().is_some(), "a suite that names no decision matches any");
+    tests.load(&empty).unwrap();
+    assert!(tests.coverage().is_none());
+}

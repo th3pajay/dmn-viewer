@@ -61,17 +61,17 @@ pub struct Checked {
 pub struct SuiteReport {
     pub path: String,
     /// `Err` holds the complete message: the suite file is unreadable or names no decision table.
-    pub result: Result<SuiteRun, String>,
+    pub result: Result<SuiteCheck, String>,
 }
 
-pub struct SuiteRun {
+pub struct SuiteCheck {
     pub decision: usize,
     pub suite: Suite,
     pub results: Vec<CaseResult>,
     pub coverage: Coverage,
 }
 
-impl SuiteRun {
+impl SuiteCheck {
     pub fn failed(&self) -> usize {
         self.results.iter().filter(|r| !r.pass).count()
     }
@@ -328,9 +328,8 @@ fn run_suite(defs: &Definitions, path: &Path) -> SuiteReport {
         let Some((decision, t)) = suite::find_table(defs, &s.decision) else {
             return Err(format!("{shown}: decision table \"{}\" not found", s.decision));
         };
-        let results: Vec<_> = s.cases.iter().map(|c| suite::run_case(t, c)).collect();
-        let coverage = Coverage::new(t.rules.len(), &results);
-        Ok(SuiteRun { decision, suite: s, results, coverage })
+        let run = s.run(t);
+        Ok(SuiteCheck { decision, suite: s, results: run.results, coverage: run.coverage })
     });
     SuiteReport { path: shown, result }
 }

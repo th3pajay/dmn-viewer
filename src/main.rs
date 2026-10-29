@@ -1195,7 +1195,7 @@ impl App {
             match defs.table(decision) {
                 Some(tb) => {
                     let fired = if tests.is_active() && tests.fields().len() == tb.inputs.len() { tests.outcome().map(|o| o.fired.clone()).unwrap_or_default() } else { Vec::new() };
-                    let coverage = (!tests.suite().cases.is_empty() && suite::targets(&tests.suite().decision, &defs.decisions[decision])).then(|| tests.coverage()).flatten();
+                    let coverage = tests.coverage();
                     (fired, coverage)
                 }
                 None => (Vec::new(), None),
@@ -2026,7 +2026,7 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
 
     let outcome = tests.outcome().expect("decision is a table");
     let results = tests.results().expect("decision is a table");
-    let coverage = suite::targets(&tests.suite().decision, &defs.decisions[decision]).then(|| tests.coverage()).flatten();
+    let coverage = tests.coverage();
 
     egui::Panel::bottom("test_suite").resizable(true).default_size(300.0).frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 8, right: 20, top: 8, bottom: 16 })).show(ui, |ui| {
         card(ui, t, |ui| {

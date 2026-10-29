@@ -13,8 +13,7 @@ fn defs() -> Definitions {
 
 fn coverage(defs: &Definitions, s: &Suite) -> Coverage {
     let (_, t) = suite::find_table(defs, &s.decision).unwrap();
-    let results: Vec<_> = s.cases.iter().map(|c| suite::run_case(t, c)).collect();
-    Coverage::new(t.rules.len(), &results)
+    s.run(t).coverage
 }
 
 #[test]

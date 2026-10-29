@@ -1,5 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use dmn_viewer::edit::{Column, Edit};
+use dmn_viewer::suite;
 use dmn_viewer::workspace::Workspace;
 use dmn_viewer::{lint, parse};
 use std::fmt::Write;
@@ -208,5 +209,19 @@ fn fixing(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, document, session, fixing);
+fn suite_run(c: &mut Criterion) {
+    let big = parse::parse(&dmn(RULES)).unwrap();
+    let small = parse::parse(&dmn(50)).unwrap();
+    let big_suite = suite::load(&scratch("run.tests.json", &suite(CASES))).unwrap();
+    let small_suite = suite::load(&scratch("run-small.tests.json", &suite(9))).unwrap();
+    let mut g = c.benchmark_group("suite_run");
+    g.sample_size(30);
+    for (name, defs, s) in [("300_cases_5000_rules", &big, &big_suite), ("9_cases_50_rules", &small, &small_suite)] {
+        let t = defs.table(0).unwrap();
+        g.bench_function(name, |b| b.iter(|| black_box(s.run(t))));
+    }
+    g.finish();
+}
+
+criterion_group!(benches, document, session, fixing, suite_run);
 criterion_main!(benches);

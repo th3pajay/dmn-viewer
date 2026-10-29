@@ -447,9 +447,9 @@ pub fn test_effect(before: &Definitions, after: &Definitions, decision: usize, s
         return None;
     }
     let (tb, ta) = (before.table(decision)?, after.table(decision)?);
+    let (b, a) = (s.run(tb), s.run(ta));
     let mut fx = TestEffect { total: s.cases.len(), ..TestEffect::default() };
-    for c in &s.cases {
-        let (b, a) = (suite::run_case(tb, c), suite::run_case(ta, c));
+    for ((c, b), a) in s.cases.iter().zip(&b.results).zip(&a.results) {
         fx.passed_before += usize::from(b.pass);
         fx.passed_after += usize::from(a.pass);
         match (b.pass, a.pass) {

@@ -87,6 +87,19 @@ pub fn find_table<'a>(defs: &'a Definitions, name: &str) -> Option<(usize, &'a D
     })
 }
 
+pub struct SuiteRun {
+    pub results: Vec<CaseResult>,
+    pub coverage: Coverage,
+}
+
+impl Suite {
+    pub fn run(&self, t: &DecisionTable) -> SuiteRun {
+        let results: Vec<CaseResult> = self.cases.iter().map(|c| run_case(t, c)).collect();
+        let coverage = Coverage::new(t.rules.len(), &results);
+        SuiteRun { results, coverage }
+    }
+}
+
 pub fn run_case(t: &DecisionTable, case: &Case) -> CaseResult {
     let outcome = evaluate(t, &context(t, case));
     let mut problems = Vec::new();

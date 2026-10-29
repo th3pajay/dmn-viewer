@@ -94,9 +94,8 @@ impl TestSession {
         let fresh = self.results.as_ref().is_some_and(|r| r.decision == decision && r.suite_gen == self.suite_gen);
         if !fresh {
             let (t, _) = table(defs, decision)?;
-            let results: Vec<_> = self.suite.cases.iter().map(|c| suite::run_case(t, c)).collect();
-            let coverage = Arc::new(Coverage::new(t.rules.len(), &results));
-            self.results = Some(Run { decision, suite_gen: self.suite_gen, results: Arc::new(results), coverage });
+            let run = self.suite.run(t);
+            self.results = Some(Run { decision, suite_gen: self.suite_gen, results: Arc::new(run.results), coverage: Arc::new(run.coverage) });
         }
         self.results.as_ref()
     }
