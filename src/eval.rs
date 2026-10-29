@@ -917,6 +917,7 @@ pub fn evaluate(t: &DecisionTable, vars: &Context) -> Outcome {
     if o.error.is_some() {
         return o;
     }
+    o.status.reserve_exact(t.rules.len());
     for (ri, r) in t.rules.iter().enumerate() {
         let mut st = RuleStatus::Matched;
         for (ci, e) in r.inputs.iter().enumerate() {

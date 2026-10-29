@@ -51,3 +51,38 @@ fn an_empty_suite_covers_nothing() {
     assert_eq!(cov.never_fired_label(), "1-7");
     assert_eq!(Coverage::new(0, &[]).summary(), "0/0 rules covered (100%)");
 }
+
+#[test]
+fn a_big_suite_runs_in_parallel_with_the_same_results_in_the_same_order() {
+    use dmn_viewer::suite::{Case, PARALLEL_WORK};
+    use std::fmt::Write;
+
+    let mut xml = String::from(
+        r#"<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/" id="d" name="d" namespace="x"><decision id="D" name="D"><decisionTable id="T" hitPolicy="FIRST"><input id="I" label="N"><inputExpression id="IE" typeRef="number"><text>N</text></inputExpression></input><output id="O" name="Out" typeRef="string"/>"#,
+    );
+    for i in 0..120 {
+        write!(xml, r#"<rule id="R{i}"><inputEntry id="I{i}"><text>{i}</text></inputEntry><outputEntry id="O{i}"><text>"r{i}"</text></outputEntry></rule>"#).unwrap();
+    }
+    xml.push_str("</decisionTable></decision></definitions>");
+    let defs = parse::parse(&xml).unwrap();
+    let t = defs.table(0).unwrap();
+
+    let cases: Vec<Case> = (0..500)
+        .map(|k| {
+            let n = k % 130;
+            let want = if n < 120 { format!("r{n}") } else { "none".to_string() };
+            Case { name: format!("case {k}"), inputs: [("N".to_string(), serde_json::json!(n))].into(), expected: [("Out".to_string(), serde_json::json!(want))].into(), ..Case::default() }
+        })
+        .collect();
+    let s = Suite { decision: "D".into(), cases };
+    assert!(s.cases.len() * t.rules.len() >= PARALLEL_WORK, "the suite is big enough to run in parallel");
+
+    let run = s.run(t);
+    let serial: Vec<_> = s.cases.iter().map(|c| suite::run_case(t, c)).collect();
+    assert_eq!(run.results.len(), serial.len());
+    for (i, (a, b)) in run.results.iter().zip(&serial).enumerate() {
+        assert_eq!((a.pass, &a.problems, &a.outcome.fired), (b.pass, &b.problems, &b.outcome.fired), "case {i}");
+    }
+    assert_eq!(run.coverage, Coverage::new(t.rules.len(), &serial));
+    assert!(run.results.iter().any(|r| r.pass) && run.results.iter().any(|r| !r.pass), "the comparison covers both outcomes");
+}

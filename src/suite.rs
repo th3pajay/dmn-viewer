@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -92,9 +93,25 @@ pub struct SuiteRun {
     pub coverage: Coverage,
 }
 
+pub const PARALLEL_WORK: usize = 50_000;
+
+fn workers() -> usize {
+    static WORKERS: OnceLock<usize> = OnceLock::new();
+    *WORKERS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
 impl Suite {
     pub fn run(&self, t: &DecisionTable) -> SuiteRun {
-        let results: Vec<CaseResult> = self.cases.iter().map(|c| run_case(t, c)).collect();
+        let n = self.cases.len();
+        let threads = if n.saturating_mul(t.rules.len()) >= PARALLEL_WORK { workers().min(n) } else { 1 };
+        let results: Vec<CaseResult> = if threads > 1 {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = self.cases.chunks(n.div_ceil(threads)).map(|cases| scope.spawn(move || cases.iter().map(|c| run_case(t, c)).collect::<Vec<_>>())).collect();
+                handles.into_iter().flat_map(|h| h.join().expect("a case run panicked")).collect()
+            })
+        } else {
+            self.cases.iter().map(|c| run_case(t, c)).collect()
+        };
         let coverage = Coverage::new(t.rules.len(), &results);
         SuiteRun { results, coverage }
     }
