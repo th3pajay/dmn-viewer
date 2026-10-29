@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::unary::{is_literal, is_quoted, literal_items};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,7 +66,7 @@ impl Issue {
 }
 
 // A cell's condition as lint compares it: literal sets by value, anything else by its text.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Cond<'a> {
     Any,
     In(&'a BTreeSet<String>),
@@ -348,6 +348,46 @@ pub fn lint(defs: &Definitions) -> Vec<Issue> {
     v
 }
 
+fn overlapping(a: &Cond, b: &Cond) -> bool {
+    overlaps(a, b) == Some(true)
+}
+
+const MEMO_LIMIT: usize = 128;
+
+struct Interned<'a> {
+    ids: Vec<u32>,
+    reps: Vec<Cond<'a>>,
+    table: Option<Vec<bool>>,
+}
+
+impl<'a> Interned<'a> {
+    fn new(tests: &[Vec<Cond<'a>>], live: &[usize], c: usize, relation: Option<fn(&Cond, &Cond) -> bool>) -> Self {
+        let mut seen: HashMap<Cond<'a>, u32> = HashMap::new();
+        let mut reps = Vec::new();
+        let mut ids = vec![0; tests.len()];
+        for &r in live {
+            let cond = tests[r][c];
+            let next = reps.len() as u32;
+            let id = *seen.entry(cond).or_insert(next);
+            if id == next {
+                reps.push(cond);
+            }
+            ids[r] = id;
+        }
+        let d = reps.len();
+        let table = relation.filter(|_| d <= MEMO_LIMIT).map(|f| (0..d * d).map(|k| f(&reps[k / d], &reps[k % d])).collect());
+        Interned { ids, reps, table }
+    }
+
+    fn holds(&self, relation: fn(&Cond, &Cond) -> bool, i: usize, j: usize) -> bool {
+        let (a, b) = (self.ids[i] as usize, self.ids[j] as usize);
+        match &self.table {
+            Some(t) => t[a * self.reps.len() + b],
+            None => relation(&self.reps[a], &self.reps[b]),
+        }
+    }
+}
+
 fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
     let mut push = |severity, code, rules: Vec<usize>, column, message: String| {
         v.push(Issue { severity, code, decision: Some(di), rules, column, message });
@@ -382,33 +422,52 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
     let outs: Vec<Vec<String>> = t.rules.iter().map(|r| r.outputs.iter().map(|e| e.text.split_whitespace().collect::<Vec<_>>().join(" ")).collect()).collect();
     let shaped = |ri: usize| tests[ri].len() == ni;
 
-    for j in 0..t.rules.len() {
-        if !shaped(j) {
-            continue;
-        }
-        for i in 0..j {
-            if !shaped(i) {
-                continue;
-            }
-            let same_inputs = (0..ni).all(|c| tests[i][c] == tests[j][c]);
-            match hp.as_str() {
-                "FIRST" => {
-                    if (0..ni).all(|c| covers(&tests[i][c], &tests[j][c])) {
-                        let what = if same_inputs { "has exactly the same conditions as" } else { "is shadowed by" };
+    let live: Vec<usize> = (0..t.rules.len()).filter(|&r| shaped(r)).collect();
+    let relation: Option<fn(&Cond, &Cond) -> bool> = match hp.as_str() {
+        "FIRST" => Some(covers),
+        "UNIQUE" | "ANY" => Some(overlapping),
+        _ => None,
+    };
+    let cols: Vec<Interned> = (0..ni).map(|c| Interned::new(&tests, &live, c, relation)).collect();
+    let mut seen_outs: HashMap<&[String], u32> = HashMap::new();
+    let out_ids: Vec<u32> = outs
+        .iter()
+        .map(|o| {
+            let next = seen_outs.len() as u32;
+            *seen_outs.entry(o.as_slice()).or_insert(next)
+        })
+        .collect();
+    let same_inputs = |i: usize, j: usize| cols.iter().all(|col| col.ids[i] == col.ids[j]);
+
+    match relation {
+        Some(rel) => {
+            let mut order: Vec<usize> = (0..ni).collect();
+            order.sort_by_key(|&c| std::cmp::Reverse(cols[c].reps.len()));
+            for (jn, &j) in live.iter().enumerate() {
+                for &i in &live[..jn] {
+                    if !order.iter().all(|&c| cols[c].holds(rel, i, j)) {
+                        continue;
+                    }
+                    if hp == "FIRST" {
+                        let what = if same_inputs(i, j) { "has exactly the same conditions as" } else { "is shadowed by" };
                         push(Severity::Error, "UNREACHABLE_RULE", vec![j, i], None, format!("Rule {} {} rule {}: with hit policy FIRST it can never fire.", j + 1, what, i + 1));
                         break;
                     }
-                }
-                "UNIQUE" | "ANY" => {
-                    if (0..ni).all(|c| overlaps(&tests[i][c], &tests[j][c]) == Some(true)) && (hp == "UNIQUE" || outs[i] != outs[j]) {
+                    if hp == "UNIQUE" || out_ids[i] != out_ids[j] {
                         push(Severity::Error, "OVERLAPPING_RULES", vec![i, j], None, format!("Rules {} and {} can match the same input, which violates hit policy {hp}.", i + 1, j + 1));
                     }
                 }
-                _ => {
-                    if same_inputs && outs[i] == outs[j] {
-                        push(Severity::Warning, "DUPLICATE_RULE", vec![i, j], None, format!("Rules {} and {} are identical.", i + 1, j + 1));
-                    }
+            }
+        }
+        None => {
+            let mut groups: HashMap<(Vec<u32>, u32), Vec<usize>> = HashMap::new();
+            for &j in &live {
+                let key = (cols.iter().map(|c| c.ids[j]).collect::<Vec<_>>(), out_ids[j]);
+                let members = groups.entry(key).or_default();
+                for &i in members.iter() {
+                    push(Severity::Warning, "DUPLICATE_RULE", vec![i, j], None, format!("Rules {} and {} are identical.", i + 1, j + 1));
                 }
+                members.push(j);
             }
         }
     }
