@@ -17,3 +17,5 @@ Domain terms used in code, docs and reviews. Use these names; don't invent synon
 - **Issue**: one finding of the checks, with a severity, a code (e.g. `UNREACHABLE_RULE`) and the decision, rules and column it is about. `lint::Issue`.
 - **Fix**: one way to resolve an issue, as edits the user confirms; a fix that deletes a rule or column is destructive and never pre-selected. `fix::Fix`.
 - **Fix session**: going through the fixable issues one at a time (apply, skip, stop), re-checking after every fix; each fix is one undo step. Skips last until the file is reloaded.
+- **Workspace**: the open file plus everything the editor needs to act on it: the document and its edit history, the active decision, the test session and the fix session. Its views of the document (test results, coverage, fixable issues) refresh themselves; callers never sync them. `workspace::Workspace`.
+- **Revision**: a number that changes whenever the document text changes, including undo, redo, discard and reload. A derived view that remembers the revision it was computed at knows it is stale when the numbers differ.
