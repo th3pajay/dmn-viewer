@@ -996,17 +996,17 @@ pub fn evaluate(t: &DecisionTable, vars: &Context) -> Outcome {
     o.fired = rows.iter().map(|(ri, _)| *ri).collect();
     o.rows = rows.into_iter().map(|(_, r)| r).collect();
 
-    if hp == "COLLECT" {
-        if let Some(agg) = t.aggregation.as_deref().map(|a| a.to_ascii_uppercase()) {
-            let nums: Vec<f64> = o.rows.iter().filter_map(|r| r.first()).filter(|v| **v != Value::Null).map(|v| v.js_number()).collect();
-            o.aggregate = Some(match agg.as_str() {
-                "COUNT" => Value::Num(nums.len() as f64),
-                "SUM" => Value::Num(nums.iter().sum()),
-                "MIN" => nums.iter().copied().reduce(f64::min).map(Value::Num).unwrap_or(Value::Null),
-                "MAX" => nums.iter().copied().reduce(f64::max).map(Value::Num).unwrap_or(Value::Null),
-                _ => Value::Null,
-            });
-        }
+    if hp == "COLLECT"
+        && let Some(agg) = t.aggregation.as_deref().map(|a| a.to_ascii_uppercase())
+    {
+        let nums: Vec<f64> = o.rows.iter().filter_map(|r| r.first()).filter(|v| **v != Value::Null).map(|v| v.js_number()).collect();
+        o.aggregate = Some(match agg.as_str() {
+            "COUNT" => Value::Num(nums.len() as f64),
+            "SUM" => Value::Num(nums.iter().sum()),
+            "MIN" => nums.iter().copied().reduce(f64::min).map(Value::Num).unwrap_or(Value::Null),
+            "MAX" => nums.iter().copied().reduce(f64::max).map(Value::Num).unwrap_or(Value::Null),
+            _ => Value::Null,
+        });
     }
     o
 }

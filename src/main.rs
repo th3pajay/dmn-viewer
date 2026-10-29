@@ -250,7 +250,16 @@ fn apply_theme(ctx: &egui::Context, t: &Theme) {
     });
 }
 
-fn badge_shape(ui: &mut egui::Ui, text: String, font: FontId, bg: Color32, fg: Color32, pad: f32, height: f32, radius: u8, max_w: f32) -> egui::Response {
+struct BadgeShape {
+    font: FontId,
+    pad: f32,
+    height: f32,
+    radius: u8,
+    max_w: f32,
+}
+
+fn badge_shape(ui: &mut egui::Ui, text: String, shape: BadgeShape, bg: Color32, fg: Color32) -> egui::Response {
+    let BadgeShape { font, pad, height, radius, max_w } = shape;
     let galley = ui.painter().layout(text, font, fg, (max_w - pad * 2.0).max(10.0));
     let galley = if galley.rows.len() > 1 {
         let first: String = galley.rows[0].text().to_string();
@@ -266,12 +275,12 @@ fn badge_shape(ui: &mut egui::Ui, text: String, font: FontId, bg: Color32, fg: C
 }
 
 fn pill(ui: &mut egui::Ui, text: impl Into<String>, bg: Color32, fg: Color32) -> egui::Response {
-    badge_shape(ui, text.into(), FontId::new(11.5, bold_family()), bg, fg, 9.0, 22.0, 11, 600.0)
+    badge_shape(ui, text.into(), BadgeShape { font: FontId::new(11.5, bold_family()), pad: 9.0, height: 22.0, radius: 11, max_w: 600.0 }, bg, fg)
 }
 
 fn chip(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) -> egui::Response {
     let max_w = ui.available_width().max(40.0);
-    badge_shape(ui, text.to_string(), FontId::monospace(11.5), bg, fg, 7.0, 22.0, 5, max_w)
+    badge_shape(ui, text.to_string(), BadgeShape { font: FontId::monospace(11.5), pad: 7.0, height: 22.0, radius: 5, max_w }, bg, fg)
 }
 
 /// How many test cases fired a rule: accent when a passing case did, red when only failing ones did.
@@ -282,7 +291,7 @@ fn coverage_badge(ui: &mut egui::Ui, t: &Theme, cov: &Coverage, ri: usize) {
         (0, f) => (t.error, hex(0xffffff), format!("Covered only by {f} failing test case{}", if f == 1 { "" } else { "s" })),
         (p, f) => (t.accent_soft, t.accent, format!("Covered by {p} passing{} test case{}", if f > 0 { format!(" and {f} failing") } else { String::new() }, if p + f == 1 { "" } else { "s" })),
     };
-    badge_shape(ui, (pass + fail).to_string(), FontId::monospace(10.0), bg, fg, 4.0, 16.0, 8, 40.0).on_hover_text(tip);
+    badge_shape(ui, (pass + fail).to_string(), BadgeShape { font: FontId::monospace(10.0), pad: 4.0, height: 16.0, radius: 8, max_w: 40.0 }, bg, fg).on_hover_text(tip);
 }
 
 /// "Coverage 7/9 rules covered (77%) · never fired: 3, 8", truncated to the space available.
@@ -1540,11 +1549,11 @@ impl App {
                                             ui.painter().hline(rr.x_range(), rr.bottom() - 1.0, Stroke::new(2.0, t.sev(s)));
                                         }
                                         draw_value(ui, &t, e.map(|(text, _)| text).unwrap_or(""), tests);
-                                        if let Some((_, lang)) = e {
-                                            if lang.is_explicit() || show_langs {
-                                                let mask = if is_sel { t.sel_row } else { t.surface };
-                                                paint_lang_tag(ui, &t, &lang.short_name(), lang.is_explicit(), mask);
-                                            }
+                                        if let Some((_, lang)) = e
+                                            && (lang.is_explicit() || show_langs)
+                                        {
+                                            let mask = if is_sel { t.sel_row } else { t.surface };
+                                            paint_lang_tag(ui, &t, &lang.short_name(), lang.is_explicit(), mask);
                                         }
                                     });
                                     if editable {
@@ -1618,10 +1627,10 @@ impl App {
                 ui.label(bold("Issues", 15.0).color(t.text));
                 if wide {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(l) = &self.loaded {
-                            if button(ui, t, ic::COPY, "Copy report", false).clicked() {
-                                ui.ctx().copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
-                            }
+                        if let Some(l) = &self.loaded
+                            && button(ui, t, ic::COPY, "Copy report", false).clicked()
+                        {
+                            ui.ctx().copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
                         }
                     });
                 }
@@ -1701,10 +1710,10 @@ impl App {
                                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                                     for part in lint::rules_label(&is.rules).split(", ") {
                                         let label = if part.contains('-') { format!("rules {part}") } else { format!("rule {part}") };
-                                        if chip(ui, &label, t.chip, t.chip_text).interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                            if let Some(r) = first_rule(part) {
-                                                acts.push(Act::Jump(r));
-                                            }
+                                        if chip(ui, &label, t.chip, t.chip_text).interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                                            && let Some(r) = first_rule(part)
+                                        {
+                                            acts.push(Act::Jump(r));
                                         }
                                     }
                                 });
@@ -1715,10 +1724,10 @@ impl App {
                     if resp.hovered() {
                         ui.painter().rect_stroke(resp.rect, CornerRadius::same(8), Stroke::new(1.0, t.faint), StrokeKind::Inside);
                     }
-                    if resp.clicked() {
-                        if let Some(r) = is.rules.iter().min() {
-                            acts.push(Act::Jump(*r));
-                        }
+                    if resp.clicked()
+                        && let Some(r) = is.rules.iter().min()
+                    {
+                        acts.push(Act::Jump(*r));
                     }
                     ui.add_space(8.0);
                 }
@@ -2001,10 +2010,10 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                     if small_button(ui, t, ic::ERASER, "Clear").clicked() {
                         tests.clear_inputs();
                     }
-                    if ui.add_enabled_ui(selected.is_some(), |ui| small_button(ui, t, ic::IMPORT, "From rule")).inner.on_hover_text("Copy the selected rule's conditions into the inputs").clicked() {
-                        if let Some(r) = selected.and_then(|r| tb.rules.get(r)) {
-                            tests.fill_from_rule(r);
-                        }
+                    if ui.add_enabled_ui(selected.is_some(), |ui| small_button(ui, t, ic::IMPORT, "From rule")).inner.on_hover_text("Copy the selected rule's conditions into the inputs").clicked()
+                        && let Some(r) = selected.and_then(|r| tb.rules.get(r))
+                    {
+                        tests.fill_from_rule(r);
                     }
                 });
             });
@@ -2050,13 +2059,13 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                     if small_button(ui, t, ic::SAVE, "Save").clicked() {
                         save_to = tests.suite_path().map(Path::to_path_buf).or_else(|| rfd::FileDialog::new().add_filter("Test suite", &["json"]).set_file_name(&default_name).save_file());
                     }
-                    if small_button(ui, t, ic::OPEN, "Load…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("Test suite", &["json"]).pick_file() {
-                            tester.status = match tests.load(&p) {
-                                Ok(n) => format!("Loaded {n} cases"),
-                                Err(e) => e,
-                            };
-                        }
+                    if small_button(ui, t, ic::OPEN, "Load…").clicked()
+                        && let Some(p) = rfd::FileDialog::new().add_filter("Test suite", &["json"]).pick_file()
+                    {
+                        tester.status = match tests.load(&p) {
+                            Ok(n) => format!("Loaded {n} cases"),
+                            Err(e) => e,
+                        };
                     }
                     if small_button(ui, t, ic::NEW, "New").clicked() {
                         tests.new_suite();

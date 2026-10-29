@@ -491,8 +491,8 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
         if let Some(c) = col {
             let mut union = BTreeSet::new();
             let mut negs: Vec<&BTreeSet<String>> = vec![];
-            for r in start..=end {
-                match &tests[r][c] {
+            for row in &tests[start..=end] {
+                match &row[c] {
                     Cond::In(x) => union.extend(x.iter().cloned()),
                     Cond::NotIn(x) => negs.push(*x),
                     _ => {}
@@ -546,15 +546,15 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
             let chars: Vec<char> = e.text.chars().collect();
             let alias = aliases(&e.text);
             for c in &calls {
-                if let Some((a, b)) = substring_args(&chars, c) {
-                    if c.receiver != ")" {
-                        let key = match b {
-                            Some(b) => format!("({a},{b})"),
-                            None => format!("({a})"),
-                        };
-                        let var = alias.get(&c.receiver).cloned().unwrap_or_else(|| c.receiver.clone());
-                        slices.entry(var).or_default().entry(key).or_default().insert(ri);
-                    }
+                if let Some((a, b)) = substring_args(&chars, c)
+                    && c.receiver != ")"
+                {
+                    let key = match b {
+                        Some(b) => format!("({a},{b})"),
+                        None => format!("({a})"),
+                    };
+                    let var = alias.get(&c.receiver).cloned().unwrap_or_else(|| c.receiver.clone());
+                    slices.entry(var).or_default().entry(key).or_default().insert(ri);
                 }
             }
             if e.lang.language == Language::Js {
