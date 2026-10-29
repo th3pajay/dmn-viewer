@@ -1,7 +1,6 @@
 use super::document::Document;
 use crate::diff::{self, Hunk, Spans};
 use crate::fix::{self, Candidate, Change, TestEffect};
-use crate::parse;
 use crate::suite::Suite;
 use std::collections::HashSet;
 
@@ -143,10 +142,11 @@ impl FixSession {
             let changes = f.edits.iter().flat_map(|e| fix::describe(&doc.defs, e)).collect();
             let decision = c.issue.decision;
             let mut p = Preview { for_step, changes, tests: None, lines: vec![], error: None };
-            match fix::apply(&doc.xml, &f.edits).and_then(|new| parse::parse(&new).map(|d| (new, d))) {
-                Ok((new, after)) => {
-                    p.tests = decision.and_then(|d| fix::test_effect(&doc.defs, &after, d, suite));
-                    p.lines = lines(&doc.xml, &new, &diff::hunks(&doc.xml, &new, &Spans::default()));
+            match doc.trial(&f.edits) {
+                Ok(trial) => {
+                    let after = trial.defs.as_ref().unwrap_or(&doc.defs);
+                    p.tests = decision.and_then(|d| fix::test_effect(&doc.defs, after, d, suite));
+                    p.lines = lines(&doc.xml, &trial.xml, &diff::hunks(&doc.xml, &trial.xml, &Spans::default()));
                 }
                 Err(e) => p.error = Some(e),
             }

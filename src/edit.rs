@@ -90,8 +90,16 @@ pub enum Edit {
 
 /// Returns the edited XML. Text before and after every changed range is kept byte for byte.
 pub fn apply(xml: &str, edit: &Edit) -> Result<String, String> {
+    let out = apply_unchecked(xml, edit)?;
+    if out != xml {
+        Document::parse(out.trim_start_matches('\u{feff}')).map_err(|e| format!("the edit would produce invalid XML: {e}"))?;
+    }
+    Ok(out)
+}
+
+pub fn apply_unchecked(xml: &str, edit: &Edit) -> Result<String, String> {
     if let Some(rest) = xml.strip_prefix('\u{feff}') {
-        return apply(rest, edit).map(|s| format!("\u{feff}{s}"));
+        return apply_unchecked(rest, edit).map(|s| format!("\u{feff}{s}"));
     }
     let out = match edit {
         Edit::Cell { decision, rule, col, text } => step(xml, |x, doc| {
@@ -125,10 +133,6 @@ pub fn apply(xml: &str, edit: &Edit) -> Result<String, String> {
         Edit::DeleteOutput { decision, output } => step(xml, |x, doc| delete_column(x, doc, *decision, *output, false))?,
         Edit::RenameDuplicateId { id } => step(xml, |_, doc| Ok(rename_duplicates(doc, id)))?,
     };
-    // Unchanged output is the input, which already parsed, so it needs no second check.
-    if out != xml {
-        Document::parse(&out).map_err(|e| format!("the edit would produce invalid XML: {e}"))?;
-    }
     Ok(out)
 }
 

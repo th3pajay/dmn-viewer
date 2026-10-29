@@ -350,6 +350,14 @@ fn unreachable(d: usize, t: &DecisionTable, j: usize, i: usize) -> Vec<Fix> {
 }
 
 /// Applies the edits in order; on error nothing is returned.
+pub fn apply_unchecked(xml: &str, edits: &[Edit]) -> Result<String, String> {
+    let mut out = xml.to_string();
+    for e in edits {
+        out = edit::apply_unchecked(&out, e)?;
+    }
+    Ok(out)
+}
+
 pub fn apply(xml: &str, edits: &[Edit]) -> Result<String, String> {
     let mut out = xml.to_string();
     for e in edits {

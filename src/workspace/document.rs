@@ -31,6 +31,11 @@ struct Change {
     cell: Option<CellText>,
 }
 
+pub(super) struct Trial {
+    pub(super) xml: String,
+    pub(super) defs: Option<Definitions>,
+}
+
 pub struct Document {
     pub(super) path: PathBuf,
     pub(super) xml: String,
@@ -86,24 +91,35 @@ impl Document {
     }
 
     pub fn commit(&mut self, edits: &[Edit]) -> Result<bool, String> {
-        let new = fix::apply(&self.xml, edits)?;
-        if new == self.xml {
-            return Ok(false);
-        }
-        let cell = match edits {
-            [Edit::Cell { decision, rule, col, text }] => Some(CellText { decision: *decision, rule: *rule, col: *col, text: text.clone() }),
-            _ => None,
-        };
-        let defs = if cell.is_none() { Some(parse::parse(&new)?) } else { None };
-        let before = cell.as_ref().map(|c| CellText { text: self.cell_text(c), ..c.clone() });
-        let delta = self.record(new, before);
-        match (defs, cell) {
-            (Some(d), _) => self.defs = d,
-            (None, Some(c)) => self.set_cell(&c, delta),
-            (None, None) => {}
+        if let [Edit::Cell { decision, rule, col, text }] = edits {
+            let new = fix::apply(&self.xml, edits)?;
+            if new == self.xml {
+                return Ok(false);
+            }
+            let cell = CellText { decision: *decision, rule: *rule, col: *col, text: text.clone() };
+            let before = CellText { text: self.cell_text(&cell), ..cell.clone() };
+            let delta = self.record(new, Some(before));
+            self.set_cell(&cell, delta);
+        } else {
+            let trial = self.trial(edits)?;
+            let Some(defs) = trial.defs else { return Ok(false) };
+            self.record(trial.xml, None);
+            self.defs = defs;
         }
         self.issues = lint::lint(&self.defs);
         Ok(true)
+    }
+
+    pub(super) fn trial(&self, edits: &[Edit]) -> Result<Trial, String> {
+        let xml = fix::apply_unchecked(&self.xml, edits)?;
+        if xml == self.xml {
+            return Ok(Trial { xml, defs: None });
+        }
+        let defs = parse::parse(&xml).map_err(|e| match e.strip_prefix("XML error: ") {
+            Some(reason) => format!("the edit would produce invalid XML: {reason}"),
+            None => e,
+        })?;
+        Ok(Trial { xml, defs: Some(defs) })
     }
 
     fn record(&mut self, new: String, cell: Option<CellText>) -> i64 {
