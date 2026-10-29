@@ -12,6 +12,10 @@ const CASES: usize = 300;
 const REGIONS: [&str; 4] = ["EU", "NA", "APAC", "LATAM"];
 
 fn dmn(rules: usize) -> String {
+    dmn_with(rules, false)
+}
+
+fn dmn_with(rules: usize, catch_all: bool) -> String {
     let mut x = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/" id="big" name="Big" namespace="http://camunda.org/schema/1.0/dmn">
@@ -27,14 +31,16 @@ fn dmn(rules: usize) -> String {
 "#,
     );
     for i in 0..rules {
-        let region = REGIONS[i % REGIONS.len()];
-        let express = if i.is_multiple_of(2) { "false" } else { "true" };
+        let any = catch_all && i == 0;
+        let region = if any { String::new() } else { format!("\"{}\"", REGIONS[i % REGIONS.len()]) };
+        let weight = if any { String::new() } else { format!("[{i}..{}]", i + 1) };
+        let express = if any || !i.is_multiple_of(2) { "" } else { "false" };
         write!(
             x,
             r#"      <rule id="R{i}">
         <description>Rule number {i}</description>
-        <inputEntry id="R{i}a"><text>"{region}"</text></inputEntry>
-        <inputEntry id="R{i}b"><text>[{i}..{n}]</text></inputEntry>
+        <inputEntry id="R{i}a"><text>{region}</text></inputEntry>
+        <inputEntry id="R{i}b"><text>{weight}</text></inputEntry>
         <inputEntry id="R{i}c"><text>{express}</text></inputEntry>
         <inputEntry id="R{i}d"><text></text></inputEntry>
         <outputEntry id="R{i}e"><text>{fee}.5</text></outputEntry>
@@ -42,7 +48,6 @@ fn dmn(rules: usize) -> String {
         <outputEntry id="R{i}g"><text>"L-" + substring(OrderDate, 3, 6)</text></outputEntry>
       </rule>
 "#,
-            n = i + 1,
             fee = i % 97,
         )
         .unwrap();
@@ -167,5 +172,43 @@ fn session(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, document, session);
+fn fixing(c: &mut Criterion) {
+    let path = scratch("fix.dmn", &dmn_with(3000, true));
+    let mut g = c.benchmark_group("fixing");
+    g.sample_size(20);
+    let mut ws = Workspace::open(path).unwrap();
+    let mut n = 0u64;
+    g.bench_function("edit", |b| {
+        b.iter(|| {
+            n += 1;
+            ws.commit_group(&[cell(1500, n.to_string())], None)
+        })
+    });
+    g.bench_function("edit_then_fixable_count", |b| {
+        b.iter(|| {
+            n += 1;
+            ws.commit_group(&[cell(1500, n.to_string())], None);
+            black_box(ws.fixable_count())
+        })
+    });
+    g.bench_function("start_and_close", |b| {
+        b.iter(|| {
+            ws.fix_start(None);
+            ws.fix_close();
+        })
+    });
+    ws.fix_start(None);
+    g.bench_function("reset_skipped_settle", |b| b.iter(|| ws.fix_reset_skipped()));
+    g.bench_function("settle_then_preview", |b| {
+        b.iter(|| {
+            ws.fix_reset_skipped();
+            ws.fix_move(true);
+            let parts = ws.fix_parts().unwrap();
+            black_box(parts.session.preview(parts.doc, parts.suite).is_some());
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(benches, document, session, fixing);
 criterion_main!(benches);

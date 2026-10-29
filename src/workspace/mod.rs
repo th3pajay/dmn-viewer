@@ -56,11 +56,11 @@ pub enum RuleOp {
     MoveDown,
 }
 
-#[derive(Default)]
 struct Fixable {
     revision: u64,
     skip_gen: u64,
     keys: HashSet<String>,
+    ids: fix::Keys,
     open: usize,
 }
 
@@ -502,9 +502,11 @@ impl Workspace {
     fn fresh(&self) -> Ref<'_, Fixable> {
         let stale = self.fixable.borrow().as_ref().is_none_or(|f| f.revision != self.doc.revision() || f.skip_gen != self.skip_gen);
         if stale {
-            let keys: HashSet<String> = if self.doc.editable { fix::queue(&self.doc.defs, &self.doc.issues, &HashSet::new(), None, None).into_iter().map(|c| c.key).collect() } else { HashSet::new() };
+            let ids = fix::Keys::new(&self.doc.defs);
+            let keys: HashSet<String> =
+                if self.doc.editable { fix::queue_with(&ids, &self.doc.defs, &self.doc.issues, &HashSet::new(), None, None).into_iter().map(|c| c.key).collect() } else { HashSet::new() };
             let open = keys.iter().filter(|k| !self.skipped.contains(*k)).count();
-            *self.fixable.borrow_mut() = Some(Fixable { revision: self.doc.revision(), skip_gen: self.skip_gen, keys, open });
+            *self.fixable.borrow_mut() = Some(Fixable { revision: self.doc.revision(), skip_gen: self.skip_gen, keys, ids, open });
         }
         Ref::map(self.fixable.borrow(), |f| f.as_ref().expect("filled above"))
     }
@@ -514,8 +516,9 @@ impl Workspace {
     }
 
     pub fn fixable_key(&self, issue: &Issue) -> Option<String> {
-        let key = fix::key(&self.doc.defs, issue);
-        self.fresh().keys.contains(&key).then_some(key)
+        let fresh = self.fresh();
+        let key = fresh.ids.key(&self.doc.defs, issue);
+        fresh.keys.contains(&key).then_some(key)
     }
 
     fn follow_fix(&mut self) {

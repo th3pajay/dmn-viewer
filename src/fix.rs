@@ -6,7 +6,7 @@ use crate::lint::{self, Issue};
 use crate::model::*;
 use crate::suite::{self, Suite};
 use crate::unary::{is_quoted, literal_items};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fix {
@@ -60,13 +60,15 @@ pub struct TestEffect {
     pub changed: Vec<String>,
 }
 
-/// Every fixable issue that is not skipped, in the order the fix session offers them:
-/// `front` first, then errors before warnings, deletions last within a severity, then document order.
 pub fn queue(defs: &Definitions, issues: &[Issue], skipped: &HashSet<String>, front: Option<&str>, only: Option<&str>) -> Vec<Candidate> {
+    queue_with(&Keys::new(defs), defs, issues, skipped, front, only)
+}
+
+pub fn queue_with(keys: &Keys, defs: &Definitions, issues: &[Issue], skipped: &HashSet<String>, front: Option<&str>, only: Option<&str>) -> Vec<Candidate> {
     let mut q: Vec<Candidate> = issues
         .iter()
         .filter_map(|is| {
-            let key = key(defs, is);
+            let key = keys.key(defs, is);
             if skipped.contains(&key) || only.is_some_and(|o| o != key) {
                 return None;
             }
@@ -86,34 +88,56 @@ pub fn queue(defs: &Definitions, issues: &[Issue], skipped: &HashSet<String>, fr
     q
 }
 
-/// A stable name for an issue: its code and the ids of the decision, rules and column it is about.
-/// A rule id that is not unique in its table gets the rule's position too.
-pub fn key(defs: &Definitions, is: &Issue) -> String {
-    let mut k = is.code.to_string();
-    let dec = is.decision.and_then(|d| defs.decisions.get(d));
-    k.push('|');
-    k.push_str(dec.map_or("", |d| d.id.as_str()));
-    let table = is.decision.and_then(|d| defs.table(d));
-    if let Some(t) = table {
-        for &r in &is.rules {
-            let id = t.rules.get(r).map_or("", |x| x.id.as_str());
-            k.push('|');
-            k.push_str(id);
-            if id.is_empty() || t.rules.iter().filter(|x| x.id == id).count() > 1 {
-                k.push_str(&format!("#{r}"));
+pub struct Keys {
+    ambiguous: Vec<Vec<bool>>,
+}
+
+impl Keys {
+    pub fn new(defs: &Definitions) -> Keys {
+        let ambiguous = (0..defs.decisions.len())
+            .map(|d| {
+                let Some(t) = defs.table(d) else { return Vec::new() };
+                let mut count: HashMap<&str, usize> = HashMap::new();
+                for r in &t.rules {
+                    *count.entry(r.id.as_str()).or_default() += 1;
+                }
+                t.rules.iter().map(|r| r.id.is_empty() || count[r.id.as_str()] > 1).collect()
+            })
+            .collect();
+        Keys { ambiguous }
+    }
+
+    pub fn key(&self, defs: &Definitions, is: &Issue) -> String {
+        let mut k = is.code.to_string();
+        let dec = is.decision.and_then(|d| defs.decisions.get(d));
+        k.push('|');
+        k.push_str(dec.map_or("", |d| d.id.as_str()));
+        let table = is.decision.and_then(|d| defs.table(d));
+        if let (Some(t), Some(d)) = (table, is.decision) {
+            for &r in &is.rules {
+                let id = t.rules.get(r).map_or("", |x| x.id.as_str());
+                k.push('|');
+                k.push_str(id);
+                if self.ambiguous[d].get(r).copied().unwrap_or(true) {
+                    k.push_str(&format!("#{r}"));
+                }
+            }
+            match is.column {
+                Some(Column::Input(i)) => k.push_str(&format!("|in:{}", t.inputs.get(i).map_or(i.to_string(), |c| clause_key(&c.id, i)))),
+                Some(Column::Output(o)) => k.push_str(&format!("|out:{}", t.outputs.get(o).map_or(o.to_string(), |c| clause_key(&c.id, o)))),
+                None => {}
             }
         }
-        match is.column {
-            Some(Column::Input(i)) => k.push_str(&format!("|in:{}", t.inputs.get(i).map_or(i.to_string(), |c| clause_key(&c.id, i)))),
-            Some(Column::Output(o)) => k.push_str(&format!("|out:{}", t.outputs.get(o).map_or(o.to_string(), |c| clause_key(&c.id, o)))),
-            None => {}
+        if is.rules.is_empty() && is.column.is_none() {
+            k.push('|');
+            k.push_str(&is.message);
         }
+        k
     }
-    if is.rules.is_empty() && is.column.is_none() {
-        k.push('|');
-        k.push_str(&is.message);
-    }
-    k
+}
+
+pub fn key(defs: &Definitions, is: &Issue) -> String {
+    Keys::new(defs).key(defs, is)
 }
 
 fn clause_key(id: &str, i: usize) -> String {

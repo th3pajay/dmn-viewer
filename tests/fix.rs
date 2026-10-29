@@ -176,6 +176,31 @@ fn keys_survive_renumbering_and_tell_duplicate_ids_apart() {
 }
 
 #[test]
+fn a_shared_keys_helper_gives_the_same_keys_as_key() {
+    let xml = table_xml(
+        "FIRST",
+        &[
+            ("R1", [r#""LATAM""#, "-", "-", "-"], [r#""A""#, r#""a""#]),
+            ("", ["-", "-", "-", "-"], [r#""B""#, r#""b""#]),
+            ("R1", [r#""EU""#, "-", "-", "-"], [r#""C""#, r#""c""#]),
+            ("", [r#""NA""#, "-", "-", "-"], [r#""D""#, r#""d""#]),
+        ],
+    );
+    let d = defs(&xml);
+    let issues = lint::lint(&d);
+    let keys = fix::Keys::new(&d);
+    assert!(!issues.is_empty());
+    for is in &issues {
+        assert_eq!(keys.key(&d, is), fix::key(&d, is));
+    }
+    let by_helper: Vec<String> = fix::queue_with(&keys, &d, &issues, &HashSet::new(), None, None).into_iter().map(|c| c.key).collect();
+    let by_queue: Vec<String> = fix::queue(&d, &issues, &HashSet::new(), None, None).into_iter().map(|c| c.key).collect();
+    assert_eq!(by_helper, by_queue);
+    assert!(by_queue.iter().any(|k| k.contains("|R1#")), "a shared id carries the rule's position: {by_queue:?}");
+    assert!(by_queue.iter().any(|k| k.contains("||") || k.contains("|#")), "an empty id carries the rule's position: {by_queue:?}");
+}
+
+#[test]
 fn front_and_only_shape_the_queue() {
     let xml = messy();
     let d = defs(&xml);
