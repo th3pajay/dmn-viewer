@@ -1,6 +1,6 @@
 use crate::eval::{self, Context, Outcome, Value};
 use crate::model::*;
-use crate::suite::{self, Case, CaseResult, Coverage, Suite, binding_key, bound, case_from_outcome, value_to_json};
+use crate::suite::{self, CaseResult, Coverage, Suite, binding_key, bound, case_from_outcome, value_to_json};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,11 +14,12 @@ pub struct TestSession {
     live: Option<(usize, Vec<String>, Arc<Outcome>)>,
     results: Option<Run>,
     revision: u64,
+    suite_gen: u64,
 }
 
 struct Run {
     decision: usize,
-    cases: Vec<Case>,
+    suite_gen: u64,
     results: Arc<Vec<CaseResult>>,
     coverage: Arc<Coverage>,
 }
@@ -90,12 +91,12 @@ impl TestSession {
     }
 
     fn run(&mut self, defs: &Definitions, decision: usize) -> Option<&Run> {
-        let fresh = self.results.as_ref().is_some_and(|r| r.decision == decision && r.cases == self.suite.cases);
+        let fresh = self.results.as_ref().is_some_and(|r| r.decision == decision && r.suite_gen == self.suite_gen);
         if !fresh {
             let (t, _) = table(defs, decision)?;
             let results: Vec<_> = self.suite.cases.iter().map(|c| suite::run_case(t, c)).collect();
             let coverage = Arc::new(Coverage::new(t.rules.len(), &results));
-            self.results = Some(Run { decision, cases: self.suite.cases.clone(), results: Arc::new(results), coverage });
+            self.results = Some(Run { decision, suite_gen: self.suite_gen, results: Arc::new(results), coverage });
         }
         self.results.as_ref()
     }
@@ -107,6 +108,7 @@ impl TestSession {
         let case = case_from_outcome(name, t, self.inputs_json(t), &outcome);
         self.claim_suite(decision_name);
         self.suite.cases.push(case);
+        self.suite_gen += 1;
     }
 
     pub fn accept(&mut self, defs: &Definitions, decision: usize, i: usize) {
@@ -114,11 +116,13 @@ impl TestSession {
         let (t, _) = table(defs, decision).expect("results imply a table");
         let (Some(c), Some(r)) = (self.suite.cases.get(i), results.get(i)) else { return };
         self.suite.cases[i] = case_from_outcome(c.name.clone(), t, c.inputs.clone(), &r.outcome);
+        self.suite_gen += 1;
     }
 
     pub fn delete(&mut self, i: usize) {
         if i < self.suite.cases.len() {
             self.suite.cases.remove(i);
+            self.suite_gen += 1;
         }
     }
 
@@ -145,6 +149,7 @@ impl TestSession {
 
     pub fn new_suite(&mut self, decision_name: &str) {
         self.suite = Suite { decision: decision_name.to_string(), cases: vec![] };
+        self.suite_gen += 1;
         self.suite_path = None;
     }
 
@@ -152,6 +157,7 @@ impl TestSession {
         let s = suite::load(path)?;
         let n = s.cases.len();
         self.suite = s;
+        self.suite_gen += 1;
         self.suite_path = Some(path.to_path_buf());
         Ok(n)
     }
