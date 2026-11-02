@@ -1,6 +1,7 @@
 use crate::gaps;
 use crate::model::*;
 use crate::unary::{is_literal, is_quoted, literal_items};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
@@ -151,6 +152,9 @@ pub struct MethodCall {
 }
 
 pub fn method_calls(s: &str) -> Vec<MethodCall> {
+    if !s.contains('(') || !s.contains('.') {
+        return Vec::new();
+    }
     let m = masked(s);
     let mut out = Vec::new();
     for i in 0..m.len() {
@@ -276,8 +280,18 @@ fn rule_list(rules: &[usize]) -> String {
     s
 }
 
+fn collapse_ws(s: &str) -> Cow<'_, str> {
+    let b = s.as_bytes();
+    let clean = b.first().is_none_or(|c| !c.is_ascii_whitespace())
+        && b.last().is_none_or(|c| !c.is_ascii_whitespace())
+        && !b.windows(2).any(|w| w[0].is_ascii_whitespace() && w[1].is_ascii_whitespace())
+        && !b.iter().any(|&c| c.is_ascii_whitespace() && c != b' ')
+        && s.is_ascii();
+    if clean { Cow::Borrowed(s) } else { Cow::Owned(s.split_whitespace().collect::<Vec<_>>().join(" ")) }
+}
+
 fn word_in(hay: &str, word: &str) -> bool {
-    if word.is_empty() {
+    if word.is_empty() || !hay.contains(word) {
         return false;
     }
     let m: String = masked(hay).into_iter().collect();
@@ -421,7 +435,7 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
     }
 
     let tests: Vec<Vec<Cond>> = t.rules.iter().map(|r| r.inputs.iter().map(cond).collect()).collect();
-    let outs: Vec<Vec<String>> = t.rules.iter().map(|r| r.outputs.iter().map(|e| e.text.split_whitespace().collect::<Vec<_>>().join(" ")).collect()).collect();
+    let outs: Vec<Vec<Cow<str>>> = t.rules.iter().map(|r| r.outputs.iter().map(|e| collapse_ws(&e.text)).collect()).collect();
     let shaped = |ri: usize| tests[ri].len() == ni;
 
     let live: Vec<usize> = (0..t.rules.len()).filter(|&r| shaped(r)).collect();
@@ -431,7 +445,7 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
         _ => None,
     };
     let cols: Vec<Interned> = (0..ni).map(|c| Interned::new(&tests, &live, c, relation)).collect();
-    let mut seen_outs: HashMap<&[String], u32> = HashMap::new();
+    let mut seen_outs: HashMap<&[Cow<str>], u32> = HashMap::new();
     let out_ids: Vec<u32> = outs
         .iter()
         .map(|o| {
@@ -445,8 +459,48 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
         Some(rel) => {
             let mut order: Vec<usize> = (0..ni).collect();
             order.sort_by_key(|&c| std::cmp::Reverse(cols[c].reps.len()));
+            let covering = hp == "FIRST";
+            let index = order.iter().copied().find(|&c| cols[c].reps.len() > 1 && cols[c].reps.iter().all(|r| matches!(r, Cond::Any | Cond::Other(_))));
+            let mut buckets: Vec<Vec<usize>> = Vec::new();
+            if let Some(c) = index {
+                buckets.resize_with(cols[c].reps.len(), Vec::new);
+                for &r in &live {
+                    buckets[cols[c].ids[r] as usize].push(r);
+                }
+            }
+            let any = index.and_then(|c| cols[c].reps.iter().position(|r| *r == Cond::Any));
             for (jn, &j) in live.iter().enumerate() {
-                for &i in &live[..jn] {
+                let (a, b): (&[usize], &[usize]) = match index {
+                    Some(c) => {
+                        let id = cols[c].ids[j] as usize;
+                        match any {
+                            Some(z) if z == id && !covering => (&live[..jn], &[]),
+                            Some(z) if z != id => (&buckets[id], &buckets[z]),
+                            _ => (&buckets[id], &[]),
+                        }
+                    }
+                    None => (&live[..jn], &[]),
+                };
+                let (mut x, mut y) = (0, 0);
+                loop {
+                    let i = match (a.get(x), b.get(y)) {
+                        (Some(&p), Some(&q)) if p < q => {
+                            x += 1;
+                            p
+                        }
+                        (_, Some(&q)) => {
+                            y += 1;
+                            q
+                        }
+                        (Some(&p), None) => {
+                            x += 1;
+                            p
+                        }
+                        (None, None) => break,
+                    };
+                    if i >= j {
+                        break;
+                    }
                     if !order.iter().all(|&c| cols[c].holds(rel, i, j)) {
                         continue;
                     }
@@ -479,11 +533,11 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
         let mut end = start;
         let mut col: Option<usize> = None;
         while end + 1 < t.rules.len() && shaped(end) && shaped(end + 1) && outs[end] == outs[end + 1] {
-            let diff: Vec<usize> = (0..ni).filter(|&c| tests[end][c] != tests[end + 1][c]).collect();
-            if diff.len() != 1 || col.is_some_and(|c| c != diff[0]) {
+            let mut diff = (0..ni).filter(|&c| tests[end][c] != tests[end + 1][c]);
+            let (Some(c), None) = (diff.next(), diff.next()) else { break };
+            if col.is_some_and(|x| x != c) {
                 break;
             }
-            let c = diff[0];
             if matches!(tests[end][c], Cond::Any | Cond::Other(_)) || matches!(tests[end + 1][c], Cond::Any | Cond::Other(_)) {
                 break;
             }
@@ -545,8 +599,7 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
                 continue;
             }
             let calls = method_calls(&e.text);
-            let chars: Vec<char> = e.text.chars().collect();
-            let alias = aliases(&e.text);
+            let (chars, alias): (Vec<char>, BTreeMap<String, String>) = if calls.is_empty() { (Vec::new(), BTreeMap::new()) } else { (e.text.chars().collect(), aliases(&e.text)) };
             for c in &calls {
                 if let Some((a, b)) = substring_args(&chars, c)
                     && c.receiver != ")"
@@ -588,8 +641,8 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
                     ),
                 );
             }
-            let bare = e.text.trim().trim_matches('"').to_ascii_uppercase();
-            if matches!(bare.as_str(), "TBC" | "TBD" | "TODO" | "FIXME" | "XXX" | "N/A" | "DUMMY" | "TEST") {
+            let bare = e.text.trim().trim_matches('"');
+            if bare.len() <= 5 && ["TBC", "TBD", "TODO", "FIXME", "XXX", "N/A", "DUMMY", "TEST"].iter().any(|p| bare.eq_ignore_ascii_case(p)) {
                 push(
                     Severity::Warning,
                     "PLACEHOLDER",
