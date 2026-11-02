@@ -195,44 +195,65 @@ impl Item {
 }
 
 pub(crate) fn split_top(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
     let mut out = Vec::new();
-    let mut cur = String::new();
+    let mut start = 0;
     let mut depth = 0i32;
-    let mut in_str = false;
-    let mut prev = '\0';
-    for c in s.chars() {
-        if in_str {
-            cur.push(c);
-            if c == '"' && prev != '\\' {
-                in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => i = skip_str(b, i),
+            b'[' | b']' | b'(' if depth == 0 && s[start..i].trim().is_empty() => match interval_end(b, i) {
+                Some(end) => i = end - 1,
+                None => depth += if b[i] == b']' { -1 } else { 1 },
+            },
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(s[start..i].trim().to_string());
+                start = i + 1;
             }
-        } else {
-            match c {
-                '"' => {
-                    in_str = true;
-                    cur.push(c);
-                }
-                '(' | '[' | '{' => {
-                    depth += 1;
-                    cur.push(c);
-                }
-                ')' | ']' | '}' => {
-                    depth -= 1;
-                    cur.push(c);
-                }
-                ',' if depth == 0 => {
-                    out.push(cur.trim().to_string());
-                    cur.clear();
-                }
-                _ => cur.push(c),
-            }
+            _ => {}
         }
-        prev = c;
+        i += 1;
     }
-    if !cur.trim().is_empty() || !out.is_empty() {
-        out.push(cur.trim().to_string());
+    if !s[start..].trim().is_empty() || !out.is_empty() {
+        out.push(s[start..].trim().to_string());
     }
     out
+}
+
+fn skip_str(b: &[u8], mut i: usize) -> usize {
+    i += 1;
+    while i < b.len() && b[i] != b'"' {
+        i += if b[i] == b'\\' { 2 } else { 1 };
+    }
+    i.min(b.len())
+}
+
+fn interval_end(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut dots = false;
+    let mut i = open + 1;
+    while i < b.len() {
+        match b[i] {
+            b'"' => i = skip_str(b, i),
+            b'(' | b'{' => depth += 1,
+            b')' if depth == 0 => return dots.then_some(i + 1),
+            b')' | b'}' => depth -= 1,
+            b'[' | b']' if depth == 0 => return dots.then_some(i + 1),
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            b',' if depth == 0 => return None,
+            b'.' if depth == 0 && b.get(i + 1) == Some(&b'.') => {
+                dots = true;
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 pub(crate) fn strip_not(t: &str) -> Option<&str> {

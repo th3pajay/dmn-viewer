@@ -102,3 +102,27 @@ fn errors_surface_when_matching() {
     assert!(check(&t, s("EU")));
     assert!(t.matches(&s("NA"), &Context::new()).is_err());
 }
+
+#[test]
+fn lists_split_around_reversed_bracket_intervals() {
+    let t = feel("[1..9[, ]9..10]");
+    assert!(check(&t, num(1.0)) && check(&t, num(8.5)) && check(&t, num(10.0)));
+    assert!(!check(&t, num(9.0)) && !check(&t, num(0.5)) && !check(&t, num(10.5)));
+    let t = feel("]0..2[, (5..7), 9");
+    assert!(check(&t, num(1.0)) && check(&t, num(6.0)) && check(&t, num(9.0)));
+    assert!(!check(&t, num(2.0)) && !check(&t, num(5.0)) && !check(&t, num(8.0)));
+    let t = feel("not(]1..2[, 5)");
+    assert!(!check(&t, num(1.5)) && !check(&t, num(5.0)) && check(&t, num(1.0)) && check(&t, num(3.0)));
+    let t = feel(r#"]"a".."c"[, "x""#);
+    assert!(check(&t, s("b")) && check(&t, s("x")) && !check(&t, s("a")));
+}
+
+#[test]
+fn brackets_inside_strings_and_calls_do_not_split() {
+    let t = feel(r#""a,]b", "c[""#);
+    assert!(check(&t, s("a,]b")) && check(&t, s("c[")) && !check(&t, s("a")));
+    let t = feel("[1..(2 + 1)], 7");
+    assert!(check(&t, num(3.0)) && check(&t, num(7.0)) && !check(&t, num(5.0)));
+    let t = feel(r#"["a,b".."c"], "z""#);
+    assert!(check(&t, s("b")) && check(&t, s("z")) && !check(&t, s("a")));
+}
