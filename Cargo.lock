@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "dmn-viewer"
-version = "0.1.8"
+version = "1.8.12"
 dependencies = [
  "criterion",
  "eframe",
