@@ -1780,21 +1780,111 @@ impl App {
     fn empty_view(&self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas)).show(ui, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new(ic::TABLE).size(40.0).color(t.faint));
-                    ui.add_space(8.0);
-                    ui.label(bold("Open a DMN file", 18.0).color(t.text));
-                    ui.label(RichText::new("Drop a .dmn file on this window, or press Ctrl+O.").color(t.muted));
-                    ui.add_space(12.0);
-                    if button(ui, &t, ic::OPEN, "Open file", true).clicked() {
-                        acts.push(Act::Open);
-                    }
-                });
+            let r = ui.max_rect();
+            paint_grid(ui.painter(), r, t.text.gamma_multiply(if t.dark { 0.05 } else { 0.06 }));
+            ui.vertical_centered(|ui| {
+                ui.add_space((r.height() * 0.5 - 104.0).max(16.0));
+                paint_mark(ui, &t, 56.0);
+                ui.add_space(14.0);
+                ui.label(bold("DMN Viewer", 28.0).color(t.text));
+                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(12.0).color(t.faint));
+                ui.add_space(26.0);
+                let hints: [(&[&str], &str, Act); 3] =
+                    [(&["Ctrl", "O"], "Open file", Act::Open), (&["Ctrl", "K"], "Command palette", Act::Cmd(menu::Cmd::Palette)), (&["F1"], "Shortcuts", Act::Cmd(menu::Cmd::Shortcuts))];
+                if let Some(a) = hint_row(ui, &t, hints) {
+                    acts.push(a);
+                }
             });
         });
     }
+}
+
+fn paint_grid(p: &egui::Painter, r: egui::Rect, color: Color32) {
+    const CW: f32 = 140.0;
+    const CH: f32 = 36.0;
+    let c = r.center();
+    let (hw, hh) = (r.width() * 0.5, r.height() * 0.5);
+    let alpha = |x: f32, y: f32| {
+        let d = (((x - c.x) / hw).powi(2) + ((y - c.y) / hh).powi(2)).sqrt() * std::f32::consts::FRAC_1_SQRT_2;
+        1.0 - ((d - 0.2) / 0.5).clamp(0.0, 1.0)
+    };
+    let seg = |a: egui::Pos2, b: egui::Pos2| {
+        let k = alpha((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        if k > 0.02 {
+            p.line_segment([a, b], Stroke::new(1.0, color.gamma_multiply(k)));
+        }
+    };
+    let mut x = r.left().round() + 0.5;
+    while x < r.right() {
+        let mut y = r.top();
+        while y < r.bottom() {
+            let y2 = (y + CH).min(r.bottom());
+            seg(egui::pos2(x, y), egui::pos2(x, y2));
+            y = y2;
+        }
+        x += CW;
+    }
+    let mut y = r.top().round() + 0.5;
+    while y < r.bottom() {
+        let mut x = r.left();
+        while x < r.right() {
+            let x2 = (x + CW).min(r.right());
+            seg(egui::pos2(x, y), egui::pos2(x2, y));
+            x = x2;
+        }
+        y += CH;
+    }
+}
+
+fn paint_mark(ui: &mut egui::Ui, t: &Theme, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let p = ui.painter();
+    let k = size / 56.0;
+    let at = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_min_size(rect.min + vec2(x * k, y * k), vec2(w * k, h * k));
+    let round = |r: f32| CornerRadius::same((r * k).round() as u8);
+    p.rect(rect.shrink(0.5), round(12.0), t.surface, Stroke::new(1.0, t.line), StrokeKind::Inside);
+    p.rect_filled(at(9.0, 11.0, 9.0, 34.0), round(3.0), t.accent);
+    p.rect_filled(at(22.0, 11.0, 25.0, 8.0), round(3.0), t.accent_soft);
+    for (y, w) in [(24.0, 25.0), (32.0, 18.0), (40.0, 22.0)] {
+        p.rect_filled(at(22.0, y, w, 3.0), round(1.5), t.line);
+    }
+}
+
+fn hint_row<const N: usize>(ui: &mut egui::Ui, t: &Theme, hints: [(&[&str], &str, Act); N]) -> Option<Act> {
+    const GAP: f32 = 22.0;
+    const CAP_H: f32 = 20.0;
+    let mono = FontId::monospace(11.5);
+    let body = FontId::proportional(12.5);
+    let p = ui.painter().clone();
+    let width = |keys: &[&str], label: &str| {
+        let caps: f32 = keys.iter().map(|k| p.layout_no_wrap((*k).to_string(), mono.clone(), t.muted).size().x + 12.0 + 4.0).sum();
+        caps + 4.0 + p.layout_no_wrap(label.to_string(), body.clone(), t.muted).size().x
+    };
+    let total: f32 = hints.iter().map(|(k, l, _)| width(k, l)).sum::<f32>() + GAP * (N.saturating_sub(1)) as f32;
+    let (row, _) = ui.allocate_exact_size(vec2(total, CAP_H + 2.0), Sense::hover());
+    let mut x = row.left();
+    let mut picked = None;
+    for (i, (keys, label, act)) in hints.into_iter().enumerate() {
+        let w = width(keys, label);
+        let area = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(w, row.height()));
+        let resp = ui.interact(area, ui.id().with(("hint", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fg = if resp.hovered() { t.text } else { t.muted };
+        let mut cx = x;
+        for k in keys {
+            let g = p.layout_no_wrap((*k).to_string(), mono.clone(), fg);
+            let cap = egui::Rect::from_min_size(egui::pos2(cx, row.top()), vec2(g.size().x + 12.0, CAP_H));
+            p.rect(cap, CornerRadius::same(5), t.surface, Stroke::new(1.0, t.line), StrokeKind::Inside);
+            p.hline(cap.x_range().shrink(2.0), cap.bottom() - 0.5, Stroke::new(1.0, t.line));
+            p.galley(cap.center() - g.size() * 0.5, g, fg);
+            cx = cap.right() + 4.0;
+        }
+        p.text(egui::pos2(cx + 4.0, row.top() + CAP_H * 0.5), Align2::LEFT_CENTER, label, body.clone(), fg);
+        if resp.clicked() {
+            picked = Some(act);
+        }
+        x += w + GAP;
+    }
+    picked
 }
 
 /// One from → to line: where, the old text struck through, the new text.
