@@ -34,7 +34,7 @@ Requires Windows with the MSVC toolchain and Rust 1.92 or newer. The C runtime i
     dmn-viewer.exe [file.dmn] [--tab rules|issues|test|xml] [--case N] [--rule N] [--dark]
 
 - Double-click a cell, header or annotation to edit it. Right-click a rule or header to insert, duplicate, move or delete.
-- Ctrl+S saves, Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D reviews every unsaved change before saving.
+- Ctrl+S saves, Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D reviews every unsaved change before saving, Ctrl+W closes the file.
 - **Fix issues** goes through the issues that have an automatic fix: Enter applies, S skips, Esc stops. The table is read-only meanwhile and nothing is saved until you save.
 
 </details>

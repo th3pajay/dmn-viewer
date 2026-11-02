@@ -85,6 +85,7 @@ pub enum Cmd {
     Open,
     OpenRecent(usize),
     ClearRecent,
+    CloseFile,
     Reload,
     Revert,
     Save,
@@ -135,6 +136,7 @@ const STATIC: &[Cmd] = &[
     Cmd::Export(Format::Markdown),
     Cmd::Export(Format::Json),
     Cmd::ClearRecent,
+    Cmd::CloseFile,
     Cmd::Quit,
     Cmd::Undo,
     Cmd::Redo,
@@ -188,6 +190,7 @@ fn keys(c: Cmd) -> Option<Bind> {
         Cmd::Save => Bind::Elsewhere(ctrl, Key::S),
         Cmd::SaveAs => Bind::Own(ctrl_shift, Key::S),
         Cmd::Quit => Bind::Own(ctrl, Key::Q),
+        Cmd::CloseFile => Bind::Own(ctrl, Key::W),
         Cmd::Undo => Bind::Elsewhere(ctrl, Key::Z),
         Cmd::Redo => Bind::Elsewhere(ctrl, Key::Y),
         Cmd::Find => Bind::Own(ctrl, Key::F),
@@ -371,6 +374,7 @@ impl App {
             Cmd::Save => i("Save", ic::SAVE, "File", s.dirty && !s.locked),
             Cmd::SaveAs => i("Save as…", ic::SAVE_AS, "File", s.doc && s.editable && !s.locked),
             Cmd::Export(f) => info_of(Cow::Owned(format!("Export as {}…", f.label())), ic::EXPORT, "File", s.table),
+            Cmd::CloseFile => i("Close", ic::X, "File", s.doc && !s.locked),
             Cmd::Quit => i("Exit", ic::X, "File", true),
             Cmd::Undo => i("Undo", ic::UNDO, "Edit", s.doc && s.can_undo),
             Cmd::Redo => i("Redo", ic::REDO, "Edit", s.doc && s.can_redo && !s.locked),
@@ -472,6 +476,7 @@ impl App {
             Cmd::Save => act(self, Act::Save),
             Cmd::SaveAs => self.save_as(),
             Cmd::Export(f) => self.export(f),
+            Cmd::CloseFile => self.guard(ctx, Pending::CloseFile),
             Cmd::Quit => self.guard(ctx, Pending::Close),
             Cmd::Undo => act(self, Act::Undo),
             Cmd::Redo => act(self, Act::Redo),
@@ -654,6 +659,7 @@ impl App {
             }
         });
         ui.separator();
+        self.item(ui, s, Cmd::CloseFile, acts);
         self.item(ui, s, Cmd::Quit, acts);
     }
 

@@ -362,6 +362,7 @@ enum Pending {
     Open,
     Reload,
     Load(PathBuf),
+    CloseFile,
     Close,
 }
 
@@ -714,6 +715,14 @@ impl App {
                 }
             }
             Pending::Load(p) => self.load(p),
+            Pending::CloseFile => {
+                self.loaded = None;
+                self.tester = Tester::default();
+                self.review = None;
+                self.header_form = None;
+                self.filter.clear();
+                self.error = None;
+            }
             Pending::Close => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
