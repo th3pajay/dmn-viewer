@@ -3,6 +3,7 @@ pub mod edit;
 pub mod eval;
 pub mod export;
 pub mod fix;
+pub mod gaps;
 pub mod lint;
 pub mod model;
 pub mod parse;

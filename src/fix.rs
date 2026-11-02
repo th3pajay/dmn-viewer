@@ -2,6 +2,7 @@
 //! of edits that the user confirms before it is applied. Nothing here reads or writes files.
 
 use crate::edit::{self, Column, Edit};
+use crate::gaps;
 use crate::lint::{self, Issue};
 use crate::model::*;
 use crate::suite::{self, Suite};
@@ -185,8 +186,17 @@ pub fn fixes(defs: &Definitions, is: &Issue) -> Vec<Fix> {
             })
             .into_iter()
             .collect(),
+        ("INCOMPLETE_TABLE", None, []) => gap_rule(d, t).into_iter().collect(),
         _ => vec![],
     }
+}
+
+fn gap_rule(d: usize, t: &DecisionTable) -> Option<Fix> {
+    let gap = gaps::gaps(t, 1)?.into_iter().next()?;
+    let at = t.rules.len();
+    let mut edits = vec![Edit::InsertRule { decision: d, at, copy_of: None }];
+    edits.extend(gap.cells.iter().enumerate().filter_map(|(i, c)| c.as_ref().map(|text| Edit::Cell { decision: d, rule: at, col: Column::Input(i), text: text.clone() })));
+    Some(Fix { label: format!("Add a rule for {}", lint::gap_text(t, &gap)), hint: Some("Fill in its outputs. It matches only inputs that no other rule matches.".into()), destructive: false, edits })
 }
 
 fn duplicate_id(is: &Issue) -> Option<Fix> {

@@ -1,3 +1,4 @@
+use crate::gaps;
 use crate::model::*;
 use crate::unary::{is_literal, is_quoted, literal_items};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -60,6 +61,7 @@ impl Issue {
             "MIXED_LANGUAGES" => "Mixed expression languages",
             "INPUT_ONLY_IN_OUTPUT" => "Input only read in outputs",
             "NO_DEFAULT_RULE" => "No catch-all rule",
+            "INCOMPLETE_TABLE" => "Missing combinations",
             _ => "Issue",
         }
     }
@@ -737,14 +739,26 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
     }
 
     if matches!(hp.as_str(), "FIRST" | "UNIQUE" | "ANY" | "PRIORITY") && !t.rules.is_empty() && !tests.iter().any(|r| r.iter().all(|x| *x == Cond::Any)) {
-        push(
-            Severity::Info,
-            "NO_DEFAULT_RULE",
-            vec![],
-            None,
-            "No catch-all rule: inputs that match nothing return an empty result (all outputs null). Add a final rule with every input set to '-' if callers expect a value.".into(),
-        );
+        match gaps::gaps(t, 3) {
+            Some(g) if g.is_empty() => {}
+            Some(g) => {
+                let shown: Vec<String> = g.iter().map(|gap| gap_text(t, gap)).collect();
+                push(Severity::Warning, "INCOMPLETE_TABLE", vec![], None, format!("Inputs that match no rule, for example {}. They get an empty result (all outputs null).", shown.join("; ")));
+            }
+            None => push(
+                Severity::Info,
+                "NO_DEFAULT_RULE",
+                vec![],
+                None,
+                "No catch-all rule: inputs that match nothing return an empty result (all outputs null). Add a final rule with every input set to '-' if callers expect a value.".into(),
+            ),
+        }
     }
+}
+
+pub fn gap_text(t: &DecisionTable, gap: &gaps::Gap) -> String {
+    let parts: Vec<String> = gap.cells.iter().zip(&t.inputs).filter_map(|(c, i)| c.as_ref().map(|c| format!("{}: {c}", i.title()))).collect();
+    if parts.is_empty() { "any input".into() } else { parts.join(", ") }
 }
 
 pub fn report(defs: &Definitions, issues: &[Issue], source: &str) -> String {

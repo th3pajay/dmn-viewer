@@ -107,6 +107,28 @@ impl UnaryTests {
         }
     }
 
+    pub(crate) fn operands<'a>(&'a self, out: &mut Vec<&'a Value>) -> Option<bool> {
+        let Kind::Feel { items, .. } = &self.kind else { return matches!(self.kind, Kind::Any).then_some(false) };
+        let mut ordered = false;
+        for it in items {
+            match it {
+                Item::Any | Item::Null => {}
+                Item::Compare(op, Operand::Value(v)) => {
+                    ordered |= !matches!(*op, "==" | "!=");
+                    out.push(v);
+                }
+                Item::Range { lo: Operand::Value(a), hi: Operand::Value(b), .. } => {
+                    ordered = true;
+                    out.push(a);
+                    out.push(b);
+                }
+                Item::Expr { value: Operand::Value(v), uses_input: false } => out.push(v),
+                _ => return None,
+            }
+        }
+        Some(ordered)
+    }
+
     /// A value to type into the tester so the cell matches: the first listed literal, or empty (null) for `not(...)`.
     pub fn sample(&self) -> Option<String> {
         let l = self.literals()?;
