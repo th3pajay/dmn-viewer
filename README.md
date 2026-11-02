@@ -1,41 +1,70 @@
-# dmn-viewer
+# DMN Viewer
 
-View, edit, check, test and fix Camunda DMN decision tables, with no installer. A Windows desktop app and a command-line checker for CI, each a single `.exe`.
+[![CI](https://github.com/th3pajay/dmn-viewer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/th3pajay/dmn-viewer/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/th3pajay/dmn-viewer)](https://github.com/th3pajay/dmn-viewer/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/th3pajay/dmn-viewer)](LICENSE)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned%20every%20release-brightgreen)](https://github.com/th3pajay/dmn-viewer/releases/latest)
 
-- **Edit in place.** Cells, headers, hit policy, rules and columns. Saving changes only the edited bytes; the diagram, namespaces, vendor attributes, comments and formatting stay exactly as they were.
-- **Find problems.** Invalid FEEL, unreachable and overlapping rules, values outside the allowed list, placeholders, unused inputs, JavaScript portability and more.
-- **Fix them one at a time.** Each automatic fix shows the change from → to and its effect on your tests before you confirm it. Every fix can be undone.
-- **Test.** Evaluate the table for any inputs with a per-rule trace, keep test suites next to your DMN files, and see which rules your tests never reach.
-- **Check in CI.** `dmn-check` reads files, folders and globs and writes text, JSON, JUnit XML or SARIF.
+**Open, check, test and fix DMN decision tables, without installing anything.**
+A Windows desktop app for the people who write the rules, and a command-line checker for CI. Each is a single `.exe`.
+
+![The rules view of the bundled shipping-fees example](docs/rules.png)
+
+## What it does
+
+- **Shows the whole table.** Rules, hit policy, types and expression languages at a glance. Reads DMN 1.1 to 1.5 and shows the file's version.
+- **Edits in place.** Change cells, headers, hit policy, rules and columns. Saving rewrites only what you changed, so the diagram, namespaces, comments and formatting stay exactly as they were.
+- **Finds problems.** Invalid FEEL, unreachable and overlapping rules, input combinations no rule covers, values outside the allowed list, placeholders, unused inputs, JavaScript that won't run on Camunda 8, and more.
+- **Fixes them with you.** Each fix shows the change and its effect on your tests before you confirm it, and every fix can be undone.
+- **Tests the logic.** Try any inputs and see which rule fires and why. Right-click a rule to fill in inputs that make it fire. Keep test suites next to your DMN files and see which rules they never reach.
+- **Stays fast.** A 5,000-rule table opens and is fully checked in about 50 ms.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/issues.png" alt="Issues found in the example table"></td>
+    <td width="50%"><img src="docs/test.png" alt="Testing the example table with a per-rule trace"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Issues, with automatic fixes where possible</sub></td>
+    <td align="center"><sub>The tester: inputs, result, rule trace and test suite</sub></td>
+  </tr>
+</table>
 
 ## Download
 
-Get the zip from the [latest release](https://github.com/th3pajay/dmn-viewer/releases/latest), unzip it anywhere and run `dmn-viewer.exe`. Nothing is installed, and nothing else is needed.
-
-Every release is built by GitHub Actions from the tagged source. To check that a download is that build and unchanged:
-
-    gh attestation verify dmn-viewer-<version>-windows-x64.zip --repo th3pajay/dmn-viewer
-
-The release notes also list SHA-256 checksums and VirusTotal scans. Releases are not code-signed yet, so on first start Windows SmartScreen may say "Windows protected your PC": choose **More info**, then **Run anyway**.
+1. Get the zip from the [latest release](https://github.com/th3pajay/dmn-viewer/releases/latest).
+2. Unzip it anywhere and run `dmn-viewer.exe`. Nothing is installed, and nothing else is needed.
 
 Neither program sends anything over the network.
 
-## Build from source
+Every release is built by GitHub Actions from the tagged source and scanned on VirusTotal; the release notes list the checksums and scan results. To check that a download is that build and unchanged:
 
-    cargo build --release
-    target\release\dmn-viewer.exe examples\shipping-fees.dmn
-    target\release\dmn-check.exe examples\shipping-fees.dmn
+    gh attestation verify dmn-viewer-<version>-windows-x64.zip --repo th3pajay/dmn-viewer
 
-Requires Windows with the MSVC toolchain and Rust 1.92 or newer. The C runtime is linked statically, so the executables run on a clean machine.
+The executables are not code-signed yet, so on first start Windows SmartScreen may say "Windows protected your PC". Choose **More info**, then **Run anyway**.
+
+## Quick start
+
+Open the bundled example to look around:
+
+    dmn-viewer.exe examples\shipping-fees.dmn
+
+- Double-click a cell or header to edit it; right-click a rule for more options, including **Test this rule**.
+- **Fix issues** walks through every issue that has an automatic fix: Enter applies, S skips, Esc stops.
+- Ctrl+S saves, Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D reviews unsaved changes, Ctrl+W closes the file, Ctrl+K opens the command palette.
+
+To check files in CI:
+
+    dmn-check.exe "rules/**/*.dmn" --sarif --fail-on warn
+
+---
 
 <details>
-<summary><b>Desktop app</b></summary>
+<summary><b>Desktop app options</b></summary>
 
     dmn-viewer.exe [file.dmn] [--tab rules|issues|test|xml] [--case N] [--rule N] [--dark]
 
-- Double-click a cell, header or annotation to edit it. Right-click a rule or header to insert, duplicate, move or delete.
-- Ctrl+S saves, Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D reviews every unsaved change before saving, Ctrl+W closes the file.
-- **Fix issues** goes through the issues that have an automatic fix: Enter applies, S skips, Esc stops. The table is read-only meanwhile and nothing is saved until you save.
+Press F1 in the app for every keyboard shortcut.
 
 </details>
 
@@ -45,7 +74,10 @@ Requires Windows with the MSVC toolchain and Rust 1.92 or newer. The C runtime i
     dmn-check.exe <file.dmn | dir | glob> [...] [--test suite.json] [--coverage]
                   [--json | --junit | --sarif] [--fail-on error|warn|never]
 
-Exit code 1 when an error is found or a test fails, 2 for a usage error. Quote globs such as `"rules/**/*.dmn"`. `--fail-on warn` also fails on warnings. SARIF works with GitHub code scanning.
+- Exit code 1 when an error is found or a test fails, 2 for a usage error.
+- `--fail-on warn` also fails on warnings.
+- Quote globs such as `"rules/**/*.dmn"`.
+- SARIF works with GitHub code scanning.
 
 </details>
 
@@ -67,6 +99,17 @@ A `<name>.tests.json` next to `<name>.dmn` is loaded automatically:
 </details>
 
 <details>
+<summary><b>Build from source</b></summary>
+
+    cargo build --release
+    target\release\dmn-viewer.exe examples\shipping-fees.dmn
+    target\release\dmn-check.exe examples\shipping-fees.dmn
+
+Requires Windows with the MSVC toolchain and Rust 1.92 or newer. The C runtime is linked statically, so the executables run on a clean machine.
+
+</details>
+
+<details>
 <summary><b>Development</b></summary>
 
     cargo test
@@ -77,13 +120,14 @@ A `<name>.tests.json` next to `<name>.dmn` is loaded automatically:
 |---|---|
 | `src/model.rs`, `src/parse.rs` | DMN model and XML parsing |
 | `src/edit.rs`, `src/diff.rs` | Byte-preserving edits; unsaved changes as line hunks |
-| `src/lint.rs`, `src/fix.rs` | The checks, and their automatic fixes |
+| `src/lint.rs`, `src/gaps.rs`, `src/fix.rs` | The checks, missing-combination search, and automatic fixes |
 | `src/unary.rs`, `src/eval.rs` | Unary tests; the FEEL, JavaScript and JUEL evaluator |
 | `src/suite.rs`, `src/session.rs` | Test suites, rule coverage, and the tester's state |
-| `src/report.rs`, `src/targets.rs` | `dmn-check` output formats; directory and glob expansion |
-| `src/main.rs`, `src/document.rs`, `src/fixing.rs` | Desktop app, its open file, and its fix session |
+| `src/report.rs`, `src/targets.rs`, `src/export.rs` | `dmn-check` output formats; directory and glob expansion; table export |
+| `src/workspace/` | The open file, rule operations and the fix session |
+| `src/main.rs`, `src/menu.rs` | Desktop app and its menus, shortcuts and settings |
 | `src/bin/dmn-check.rs` | Command-line checker |
-| `examples/`, `tests/`, `assets/` | Example table and suite, integration tests, embedded fonts and icons |
+| `examples/`, `tests/`, `assets/`, `docs/` | Example table and suite, integration tests, embedded fonts and icons, screenshots |
 
 Real decision tables stay out of the repository: `.gitignore` excludes every `*.dmn` and `*.tests.json` outside `examples/`. [GLOSSARY.md](GLOSSARY.md) defines the domain terms used in the code.
 
