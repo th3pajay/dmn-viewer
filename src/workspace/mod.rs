@@ -526,6 +526,10 @@ impl Tests<'_> {
         self.session.fill_from_rule(rule);
     }
 
+    pub fn fill_to_fire(&mut self, rule: usize) -> bool {
+        self.session.fill_to_fire(self.defs, self.decision, rule)
+    }
+
     pub fn new_suite(&mut self) {
         let defs = self.defs;
         let name = defs.decisions.get(self.decision).map_or("", |d| d.name.as_str());

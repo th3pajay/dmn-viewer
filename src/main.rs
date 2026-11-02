@@ -413,6 +413,11 @@ const TYPES: [&str; 7] = ["string", "integer", "long", "double", "boolean", "dat
 const CELL_LANGS: [(&str, Option<&str>); 4] = [("Default (file or FEEL)", None), ("FEEL", Some("feel")), ("JavaScript", Some("javascript")), ("JUEL", Some("juel"))];
 
 fn rule_menu(ui: &mut egui::Ui, decision: usize, ri: usize, nrules: usize, acts: &mut Vec<Act>) {
+    if ui.button("Test this rule").on_hover_text("Fill the test inputs with values that make this rule fire, then open the Test tab").clicked() {
+        acts.push(Act::TestRule(ri));
+        ui.close();
+    }
+    ui.separator();
     let items = [
         ("Insert rule above", true, Edit::InsertRule { decision, at: ri, copy_of: None }),
         ("Insert rule below", true, Edit::InsertRule { decision, at: ri + 1, copy_of: None }),
@@ -480,6 +485,7 @@ fn edit_box(ui: &mut egui::Ui, ed: &mut Editing, acts: &mut Vec<Act>) {
 enum Act {
     Select(usize),
     Jump(usize),
+    TestRule(usize),
     View(View),
     Decision(usize),
     Open,
@@ -970,6 +976,16 @@ impl App {
                 Act::View(v) => {
                     if let Some(l) = self.loaded.as_mut() {
                         l.set_view(v);
+                    }
+                }
+                Act::TestRule(r) => {
+                    if let Some(l) = self.loaded.as_mut() {
+                        if l.tests().fill_to_fire(r) {
+                            l.select_and_reveal(r);
+                            l.set_view(View::Test);
+                        } else {
+                            self.error = Some(format!("Could not find inputs that make rule {} fire.", r + 1));
+                        }
                     }
                 }
                 Act::Decision(d) => {

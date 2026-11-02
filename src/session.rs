@@ -146,6 +146,31 @@ impl TestSession {
         }
     }
 
+    pub fn fill_to_fire(&mut self, defs: &Definitions, decision: usize, rule: usize) -> bool {
+        let Some(t) = defs.table(decision) else { return false };
+        let Some(values) = crate::gaps::witness(t, rule) else { return false };
+        let free = |i: usize| t.rules.iter().all(|r| r.inputs[i].tests.is_any());
+        let from_suite = |i: usize| {
+            self.suite.cases.iter().find_map(|c| match bound(&t.inputs[i], &c.inputs)? {
+                J::Null => None,
+                J::String(s) => Some(s.clone()),
+                other => Some(other.to_string()),
+            })
+        };
+        self.fields = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| match v {
+                Some(Value::Str(s)) => s,
+                Some(Value::Num(n)) => eval::fmt_num(n),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(Value::Null) | None if free(i) => from_suite(i).unwrap_or_default(),
+                Some(Value::Null) | None => String::new(),
+            })
+            .collect();
+        true
+    }
+
     pub fn new_suite(&mut self, decision_name: &str) {
         self.suite = Suite { decision: decision_name.to_string(), cases: vec![] };
         self.suite_gen += 1;

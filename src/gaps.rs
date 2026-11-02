@@ -373,3 +373,105 @@ impl Search<'_> {
         Ok(true)
     }
 }
+
+pub fn witness(t: &DecisionTable, rule: usize) -> Option<Vec<Option<Value>>> {
+    let ni = t.inputs.len();
+    let n = t.rules.len();
+    if rule >= n || t.rules.iter().any(|r| r.inputs.len() != ni) {
+        return None;
+    }
+    let w = n.div_ceil(64);
+    let bit = |m: &[u64], r: usize| m[r / 64] >> (r % 64) & 1 == 1;
+    let all = {
+        let mut m = vec![0u64; w];
+        (0..n).for_each(|r| m[r / 64] |= 1 << (r % 64));
+        m
+    };
+    let ctx = Context::new();
+    let mut cands: Vec<Vec<(Option<Value>, Vec<u64>)>> = Vec::with_capacity(ni);
+    for c in 0..ni {
+        let target = &t.rules[rule].inputs[c].tests;
+        let mut list = Vec::new();
+        if target.is_any() {
+            let mut m = vec![0u64; w];
+            for (ri, r) in t.rules.iter().enumerate() {
+                if r.inputs[c].tests.matches(&Value::Null, &ctx).unwrap_or(true) {
+                    m[ri / 64] |= 1 << (ri % 64);
+                }
+            }
+            list.push((None, m));
+        }
+        match column(t, c, w, &ctx) {
+            Some(col) => {
+                let reps = reps(&col.domain);
+                for (g, members) in col.members.iter().enumerate() {
+                    let m = col.mask(g);
+                    if bit(m, rule) {
+                        let k = members.iter().copied().find(|k| matches!(col.domain, Domain::Num(_)) && k % 2 == 1).unwrap_or(members[0]);
+                        list.push((Some(readable(&col.domain, &reps[k])), m.to_vec()));
+                    }
+                }
+            }
+            None if !target.is_any() => list.push((target.sample().map(Value::Str), all.clone())),
+            None => {}
+        }
+        if list.is_empty() {
+            list.push((target.sample().map(Value::Str), all.clone()));
+        }
+        cands.push(list);
+    }
+    let hp = t.hit_policy.to_ascii_uppercase();
+    let avoid: Vec<usize> = match hp.as_str() {
+        "FIRST" => (0..rule).collect(),
+        "UNIQUE" | "ANY" | "PRIORITY" => (0..n).filter(|&r| r != rule).collect(),
+        _ => vec![],
+    };
+    let mut live = vec![0u64; w];
+    for &r in avoid.iter().chain([&rule]) {
+        live[r / 64] |= 1 << (r % 64);
+    }
+    let mut pick = vec![0usize; ni];
+    let mut nodes = 0usize;
+    let clean = fire(&cands, 0, &live, rule, &mut pick, &mut nodes);
+    if !clean {
+        pick.iter_mut().for_each(|p| *p = 0);
+    }
+    Some(cands.into_iter().zip(pick).map(|(list, p)| list.into_iter().nth(p).and_then(|(v, _)| v)).collect())
+}
+
+fn fire(cands: &[Vec<(Option<Value>, Vec<u64>)>], c: usize, live: &[u64], rule: usize, pick: &mut [usize], nodes: &mut usize) -> bool {
+    let only = live.iter().enumerate().all(|(i, &x)| x == if i == rule / 64 { 1 << (rule % 64) } else { 0 });
+    if only {
+        pick[c..].iter_mut().for_each(|p| *p = 0);
+        return true;
+    }
+    if c == cands.len() || *nodes > BUDGET {
+        return false;
+    }
+    let mut next = vec![0u64; live.len()];
+    for (k, (_, m)) in cands[c].iter().enumerate() {
+        *nodes += 1;
+        next.iter_mut().zip(live).zip(m).for_each(|((n, a), b)| *n = a & b);
+        pick[c] = k;
+        if fire(cands, c + 1, &next, rule, pick, nodes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn readable(d: &Domain, v: &Value) -> Value {
+    match (d, v) {
+        (Domain::Disc { values, .. }, Value::Str(s)) if s == OTHER => {
+            let taken = |x: &str| values.iter().any(|v| matches!(v, Value::Str(y) if y == x));
+            let mut name = "other".to_string();
+            let mut i = 2;
+            while taken(&name) {
+                name = format!("other{i}");
+                i += 1;
+            }
+            Value::Str(name)
+        }
+        _ => v.clone(),
+    }
+}
