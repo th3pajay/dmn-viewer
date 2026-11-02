@@ -5,6 +5,7 @@ pub struct Definitions {
     pub id: String,
     pub name: String,
     pub namespace: String,
+    pub dmn_version: Option<&'static str>,
     pub exporter: String,
     pub exporter_version: String,
     pub expression_language: Option<String>,

@@ -1104,6 +1104,7 @@ impl App {
         let dirty = l.dirty();
         let fixing = self.is_fixing();
         let fixable = l.fixable_count();
+        let dmn_version = l.defs().dmn_version;
         ui.horizontal_centered(|ui| {
             ui.label(RichText::new(format!("{file}{}  /", if dirty { " •" } else { "" })).color(t.faint)).on_hover_text(if dirty { "Unsaved changes (Ctrl+S to save)" } else { "Saved" });
             if let Some(d) = dec {
@@ -1137,6 +1138,9 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(v) = dmn_version {
+                    pill(ui, format!("DMN {v}"), t.chip, t.muted).on_hover_text("DMN version, from the file's namespace");
+                }
                 if button(ui, &t, ic::PLAY, "Run tests", true).clicked() {
                     acts.push(Act::View(View::Test));
                 }

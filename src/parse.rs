@@ -41,6 +41,10 @@ fn named(n: Node) -> NamedElement {
     NamedElement { id: attr(n, "id"), name: attr(n, "name") }
 }
 
+pub fn dmn_version(ns: &str) -> Option<&'static str> {
+    [("20151101", "1.1"), ("20180521", "1.2"), ("20191111", "1.3"), ("20211108", "1.4"), ("20230324", "1.5")].into_iter().find(|(d, _)| ns.contains(d)).map(|(_, v)| v)
+}
+
 pub fn parse(xml: &str) -> Result<Definitions, String> {
     let xml = xml.trim_start_matches('\u{feff}');
     let doc = Document::parse(xml).map_err(|e| format!("XML error: {e}"))?;
@@ -62,6 +66,7 @@ pub fn parse(xml: &str) -> Result<Definitions, String> {
         id: attr(root, "id"),
         name: attr(root, "name"),
         namespace: attr(root, "namespace"),
+        dmn_version: root.tag_name().namespace().and_then(dmn_version),
         exporter: attr(root, "exporter"),
         exporter_version: attr(root, "exporterVersion"),
         expression_language: opt_attr(root, "expressionLanguage"),
