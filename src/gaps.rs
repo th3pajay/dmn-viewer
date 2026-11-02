@@ -115,14 +115,11 @@ fn column(t: &DecisionTable, c: usize, w: usize, ctx: &Context) -> Option<Col> {
     } else if !ops.is_empty() && ops.iter().all(|v| matches!(v, Value::Bool(_))) {
         Domain::Disc { values: vec![Value::Bool(true), Value::Bool(false)], other: false }
     } else if ops.iter().all(|v| matches!(v, Value::Str(_))) {
-        match allowed.filter(|a| !a.is_empty() && a.iter().all(|v| matches!(v, Value::Str(_)))) {
-            Some(values) => Domain::Disc { values, other: false },
-            None => {
-                let mut seen = HashMap::new();
-                let values = ops.iter().filter(|v| seen.insert(text(v), ()).is_none()).map(|v| (*v).clone()).collect();
-                Domain::Disc { values, other: true }
-            }
-        }
+        let closed = allowed.filter(|a| !a.is_empty() && a.iter().all(|v| matches!(v, Value::Str(_))));
+        let other = closed.is_none();
+        let mut seen = HashMap::new();
+        let values = closed.into_iter().flatten().chain(ops.iter().map(|v| (*v).clone())).filter(|v| seen.insert(text(v), ()).is_none()).collect();
+        Domain::Disc { values, other }
     } else {
         return None;
     };

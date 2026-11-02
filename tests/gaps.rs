@@ -64,6 +64,13 @@ fn allowed_values_close_the_domain() {
 }
 
 #[test]
+fn rule_values_outside_the_allowed_list_still_count() {
+    let x = table("FIRST", &[("Client", Some(r#""alpha","beta""#))], &[&[r#""C100""#], &[r#""alpha""#]]);
+    assert_eq!(gaps_of(&x), Some(vec![vec![s(r#""beta""#)]]));
+    assert!(codes(&x).contains(&"NOT_IN_ALLOWED_VALUES"));
+}
+
+#[test]
 fn a_gap_leaves_unconstrained_columns_free() {
     let x = table("FIRST", &[("Region", None), ("Weight", None)], &[&[r#""EU""#, "< 5"], &[r#""EU""#, ">= 5"], &[r#""NA""#, "-"]]);
     assert_eq!(gaps_of(&x), Some(vec![vec![s(r#"not("EU", "NA")"#), None]]));
