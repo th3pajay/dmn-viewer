@@ -186,3 +186,40 @@ fn reloading_the_file_keeps_the_suite_and_refreshes_the_results() {
     ws.reload().unwrap();
     assert!(!Arc::ptr_eq(&a, &ws.tests().results().unwrap()), "a new document is a new revision");
 }
+
+#[test]
+fn testing_a_rule_expects_its_output_cells_and_follows_edits() {
+    use dmn_viewer::eval::Value;
+    let mut ws = fresh("expect-rule");
+    assert!(ws.tests().expected().is_none());
+    assert!(ws.tests().fill_to_fire(0));
+    assert_eq!(ws.tests().target(), Some(0));
+    let e = ws.tests().expected();
+    assert_eq!(e.as_ref().as_ref().unwrap().values[0], Value::Num(4.5));
+    assert!(ws.commit_group(&[cell(0, "7")], None));
+    let e = ws.tests().expected();
+    assert_eq!(e.as_ref().as_ref().unwrap().values[0], Value::Num(7.0));
+    ws.tests().clear_target();
+    assert!(ws.tests().expected().is_none());
+}
+
+#[test]
+fn expected_follows_cases_snapshots_and_deletions() {
+    use dmn_viewer::eval::Value;
+    let mut ws = fresh("expect-case");
+    set_fields(&mut ws, fields("\"EU\"", "2.5", "false", "\"20260314\""));
+    ws.tests().add_case("first");
+    ws.tests().add_case("second");
+    let e = ws.tests().expected();
+    assert!(e.as_ref().as_ref().unwrap().label.contains("second"));
+    ws.tests().delete(0);
+    let e = ws.tests().expected();
+    assert!(e.as_ref().as_ref().unwrap().label.contains("second"));
+    ws.tests().delete(0);
+    assert!(ws.tests().expected().is_none());
+    ws.tests().snapshot();
+    let e = ws.tests().expected();
+    assert_eq!(e.as_ref().as_ref().unwrap().values[0], Value::Num(4.5));
+    ws.tests().clear_expected();
+    assert!(ws.tests().expected().is_none());
+}

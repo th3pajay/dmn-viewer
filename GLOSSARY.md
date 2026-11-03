@@ -13,6 +13,7 @@ Domain terms used in code, docs and reviews. Use these names; don't invent synon
 - **Test case**: named inputs and the expected outputs and/or fired rules.
 - **Input binding**: how a table input finds its value among named values: by its input expression, falling back to its label.
 - **Test session**: the tester's working state for one decision table: the current inputs, the loaded test suite and their evaluated results.
+- **Expected result**: what the tester compares the actual result against: the output cells of the rule under test, a saved case, or a snapshot of an earlier result. `session::Expect`.
 - **Rule coverage**: which rules a test suite's cases fire; a rule fired only by failing cases is counted separately. `suite::Coverage`.
 - **Issue**: one finding of the checks, with a severity, a code (e.g. `UNREACHABLE_RULE`) and the decision, rules and column it is about. `lint::Issue`.
 - **Fix**: one way to resolve an issue, as edits the user confirms; a fix that deletes a rule or column is destructive and never pre-selected. `fix::Fix`.

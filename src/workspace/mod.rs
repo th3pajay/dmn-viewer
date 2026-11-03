@@ -8,7 +8,7 @@ use crate::eval::Outcome;
 use crate::export::{self, Format};
 use crate::lint::{Column, Issue};
 use crate::model::{Definitions, Rule};
-use crate::session::TestSession;
+use crate::session::{Expected, TestSession};
 use crate::suite::{self, CaseResult, Coverage, Suite};
 use document::Document;
 use fixing::{FixSession, Fixable};
@@ -479,6 +479,26 @@ impl Tests<'_> {
 
     pub fn clear_inputs(&mut self) {
         self.session.clear_inputs();
+    }
+
+    pub fn target(&self) -> Option<usize> {
+        self.session.target().filter(|&r| self.defs.table(self.decision).is_some_and(|t| r < t.rules.len()))
+    }
+
+    pub fn clear_target(&mut self) {
+        self.session.clear_target();
+    }
+
+    pub fn clear_expected(&mut self) {
+        self.session.clear_expected();
+    }
+
+    pub fn snapshot(&mut self) {
+        self.session.snapshot(self.defs, self.decision);
+    }
+
+    pub fn expected(&mut self) -> Arc<Option<Expected>> {
+        self.session.expected(self.defs, self.decision)
     }
 
     pub fn suite(&self) -> &Suite {

@@ -355,6 +355,7 @@ fn card<R>(ui: &mut egui::Ui, t: &Theme, add: impl FnOnce(&mut egui::Ui) -> R) -
 struct Tester {
     case_name: String,
     status: String,
+    scroll_target: bool,
 }
 
 #[derive(Clone)]
@@ -983,6 +984,7 @@ impl App {
                         if l.tests().fill_to_fire(r) {
                             l.select_and_reveal(r);
                             l.set_view(View::Test);
+                            self.tester.scroll_target = true;
                         } else {
                             self.error = Some(format!("Could not find inputs that make rule {} fire.", r + 1));
                         }
@@ -2256,94 +2258,217 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
         });
     });
 
+    let expected = tests.expected();
+    let target = tests.target();
+    let verdict = expected.as_ref().as_ref().filter(|_| outcome.error.is_none()).map(|e| (e, e.values.iter().enumerate().filter(|(i, v)| outcome.output(*i) != **v).count()));
+    let mut add_case = false;
+    let mut snapshot = false;
+    let mut clear_expected = false;
+    let mut clear_target = false;
+    let step = ui.input_mut(|i| if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown) { 1 } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp) { -1 } else { 0 });
+    if step != 0 && !tb.rules.is_empty() {
+        let next = target.map_or(0, |r| r.saturating_add_signed(step).min(tb.rules.len() - 1));
+        acts.push(Act::TestRule(next));
+    }
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
+        add_case = true;
+    }
+    let bad_bg = if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) };
+    let target_bg = if t.dark { hex(0x1d2a4a) } else { hex(0xe8f0ff) };
+
     egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 8, right: 20, top: 16, bottom: 8 })).show(ui, |ui| {
         card(ui, t, |ui| {
             ui.set_min_height(ui.available_height());
-            egui::ScrollArea::vertical().id_salt("result").auto_shrink([false, false]).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(bold("Result", 15.0).color(t.text));
-                    pill(ui, &tb.hit_policy, t.chip, t.muted);
-                    if outcome.error.is_none() {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        for &r in &outcome.fired {
-                            if chip(ui, &format!("rule {}", r + 1), t.accent_soft, t.accent).interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                acts.push(Act::Jump(r));
-                            }
+            ui.horizontal(|ui| {
+                ui.label(bold("Result", 15.0).color(t.text));
+                pill(ui, &tb.hit_policy, t.chip, t.muted);
+                if outcome.error.is_none() {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for &r in &outcome.fired {
+                        if chip(ui, &format!("rule {}", r + 1), t.accent_soft, t.accent).interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            acts.push(Act::Jump(r));
                         }
                     }
-                });
-                ui.add_space(6.0);
-                if let Some(e) = &outcome.error {
-                    Frame::new().fill(if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) }).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(10)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(bold("Evaluation fails in Camunda", 12.5).color(t.error_text));
-                        ui.add(egui::Label::new(RichText::new(e).size(12.5).color(t.error_text)).wrap());
-                    });
-                } else if outcome.fired.is_empty() {
-                    ui.label(RichText::new("No rule matched, so every output is null.").color(t.warn_text));
                 }
-                if outcome.error.is_none() {
-                    let rows: Vec<Vec<Value>> = if outcome.rows.is_empty() { vec![vec![Value::Null; tb.outputs.len()]] } else { outcome.rows.clone() };
-                    ui.add_space(4.0);
-                    egui::Grid::new("out_grid").num_columns(3).spacing([18.0, 8.0]).show(ui, |ui| {
-                        for (ri, row) in rows.iter().enumerate() {
-                            for (oi, out) in tb.outputs.iter().enumerate() {
-                                let v = row.get(oi).cloned().unwrap_or(Value::Null);
-                                let name = if rows.len() > 1 { format!("{} #{}", out.title(), ri + 1) } else { out.title().to_string() };
-                                ui.label(RichText::new(name).color(t.muted));
-                                if v == Value::Null {
-                                    ui.label(RichText::new("null").font(FontId::monospace(13.0)).color(t.faint));
-                                } else {
-                                    chip(ui, &v.display(), t.chip, t.text);
-                                }
-                                let mismatch = out.type_ref.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("string")) && !matches!(v, Value::Str(_) | Value::Null);
-                                ui.label(RichText::new(format!("{} / {}", v.type_name(), out.type_ref.as_deref().unwrap_or("-"))).size(11.5).color(if mismatch { t.error_text } else { t.faint }));
-                                ui.end_row();
-                            }
-                        }
-                        if let Some(a) = &outcome.aggregate {
-                            ui.label(RichText::new(format!("{} ({})", tb.outputs.first().map(|o| o.title()).unwrap_or("result"), tb.aggregation.clone().unwrap_or_default())).color(t.muted));
-                            chip(ui, &a.display(), t.chip, t.text);
-                            ui.label(RichText::new(a.type_name()).size(11.5).color(t.faint));
-                            ui.end_row();
-                        }
-                    });
-                }
-                ui.add_space(14.0);
-                ui.label(bold(format!("Rule trace  ·  {} matched", outcome.matched.len()), 12.5).color(t.text));
-                ui.add_space(4.0);
-                egui::Grid::new("trace").num_columns(3).spacing([12.0, 5.0]).show(ui, |ui| {
-                    for (ri, st) in outcome.status.iter().enumerate() {
-                        if ui
-                            .add(egui::Label::new(RichText::new(format!("rule {}", ri + 1)).size(12.5).color(t.accent)).sense(Sense::click()))
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            acts.push(Act::Jump(ri));
-                        }
-                        match st {
-                            RuleStatus::Matched => {
-                                let f = outcome.fired.contains(&ri);
-                                ui.label(RichText::new(format!("{} {}", ic::CHECK, if f { "fired" } else { "matched" })).size(12.5).color(t.accent));
-                                ui.label(RichText::new(if f { "" } else { "not used by the hit policy" }).size(12.0).color(t.faint));
-                            }
-                            RuleStatus::Failed(ci) => {
-                                ui.label(RichText::new("no match").size(12.0).color(t.faint));
-                                let entry = tb.rules[ri].inputs.get(*ci).map(|e| one_line(&e.text)).unwrap_or_default();
-                                let val = outcome.inputs.get(*ci).map(|v| v.display()).unwrap_or_default();
-                                ui.label(RichText::new(format!("{} = {val} does not satisfy {entry}", tb.inputs[*ci].title())).size(12.0).color(t.muted));
-                            }
-                            RuleStatus::Error(e) => {
-                                ui.label(RichText::new("error").size(12.0).color(t.error_text));
-                                ui.label(RichText::new(e).size(12.0).color(t.error_text));
-                            }
-                        }
-                        ui.end_row();
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if small_button(ui, t, ic::PLUS, "Add as case").on_hover_text("Ctrl+Enter. Saves the inputs and the current result as the expected result").clicked() {
+                        add_case = true;
                     }
                 });
             });
+            ui.add_space(6.0);
+            if let Some(r) = target {
+                Frame::new().fill(target_bg).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(9)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(bold(format!("Testing rule {}", r + 1), 12.5).color(t.text));
+                        if outcome.error.is_some() {
+                            pill(ui, "evaluation error", t.error, hex(0xffffff));
+                        } else if outcome.fired.contains(&r) {
+                            pill(ui, format!("{} fired", ic::CHECK), t.accent_soft, t.accent);
+                        } else if let Some(&by) = outcome.fired.first() {
+                            pill(ui, format!("shadowed by rule {}", by + 1), t.chip, t.warn_text);
+                        } else {
+                            pill(ui, "did not match", t.error, hex(0xffffff));
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if small_button(ui, t, ic::X, "Clear").clicked() {
+                                clear_target = true;
+                            }
+                        });
+                    });
+                    ui.label(RichText::new("Inputs come from the rule, expected outputs from its cells.").size(11.5).color(t.muted));
+                });
+                ui.add_space(6.0);
+            }
+            if let Some(e) = &outcome.error {
+                Frame::new().fill(bad_bg).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(10)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(bold("Evaluation fails in Camunda", 12.5).color(t.error_text));
+                    ui.add(egui::Label::new(RichText::new(e).size(12.5).color(t.error_text)).wrap());
+                });
+            } else {
+                let (bg, fg) = match verdict {
+                    None => (t.chip, t.muted),
+                    Some((_, 0)) => (t.accent_soft, t.accent),
+                    Some(_) => (bad_bg, t.error_text),
+                };
+                Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(9)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        match verdict {
+                            None => ui.label(bold("No expected result", 12.5).color(fg)),
+                            Some((e, 0)) => ui.label(bold(format!("{} Pass: all {} values match {}", ic::CHECK, e.values.len(), e.label), 12.5).color(fg)),
+                            Some((e, n)) => ui.label(bold(format!("{} Fail: {n} of {} values differ from {}", ic::X, e.values.len(), e.label), 12.5).color(fg)),
+                        };
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if verdict.is_some() && small_button(ui, t, ic::X, "").on_hover_text("Forget the expected result").clicked() {
+                                clear_expected = true;
+                            }
+                            if small_button(ui, t, ic::CHECK, if verdict.is_none() { "Use actual as expected" } else { "Accept actual" }).clicked() {
+                                snapshot = true;
+                            }
+                        });
+                    });
+                });
+                if outcome.fired.is_empty() {
+                    ui.label(RichText::new("No rule matched, so every output is null.").color(t.warn_text));
+                }
+                ui.add_space(6.0);
+                let nrows = if outcome.aggregate.is_some() { 1 } else { outcome.rows.len().max(1) };
+                egui::Grid::new("out_grid").num_columns(5).spacing([18.0, 7.0]).show(ui, |ui| {
+                    for h in ["Output", "Expected", "Actual", "Type", ""] {
+                        ui.label(RichText::new(h.to_uppercase()).size(10.5).color(t.faint));
+                    }
+                    ui.end_row();
+                    for ri in 0..nrows {
+                        for (oi, out) in tb.outputs.iter().enumerate() {
+                            let actual = if ri == 0 { outcome.output(oi) } else { outcome.rows[ri].get(oi).cloned().unwrap_or(Value::Null) };
+                            let want = verdict.filter(|_| ri == 0).map(|(e, _)| &e.values[oi]);
+                            let name = match (&outcome.aggregate, nrows) {
+                                (Some(_), _) if oi == 0 => format!("{} ({})", out.title(), tb.aggregation.clone().unwrap_or_default()),
+                                (None, n) if n > 1 => format!("{} #{}", out.title(), ri + 1),
+                                _ => out.title().to_string(),
+                            };
+                            ui.label(RichText::new(name).color(t.muted));
+                            match want {
+                                Some(w) => value_cell(ui, t, w, t.chip, t.text),
+                                None => {
+                                    ui.label(RichText::new("-").color(t.faint));
+                                }
+                            }
+                            let (abg, afg) = match want {
+                                Some(w) if *w == actual => (t.accent_soft, t.accent),
+                                Some(_) => (bad_bg, t.error_text),
+                                None => (t.chip, t.text),
+                            };
+                            value_cell(ui, t, &actual, abg, afg);
+                            let mismatch = out.type_ref.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("string")) && !matches!(actual, Value::Str(_) | Value::Null);
+                            ui.label(RichText::new(format!("{} / {}", actual.type_name(), out.type_ref.as_deref().unwrap_or("-"))).size(11.5).color(if mismatch { t.error_text } else { t.faint }));
+                            match want {
+                                Some(w) if *w == actual => ui.label(bold(ic::CHECK, 13.0).color(t.accent)),
+                                Some(_) => ui.label(bold(ic::X, 13.0).color(t.error)),
+                                None => ui.label(RichText::new("·").color(t.faint)),
+                            };
+                            ui.end_row();
+                        }
+                    }
+                });
+            }
+            ui.add_space(12.0);
+            ui.label(bold(format!("Rule trace  ·  {} matched", outcome.matched.len()), 12.5).color(t.text));
+            ui.add_space(4.0);
+            let row_h = 22.0;
+            let pitch = row_h + ui.spacing().item_spacing.y;
+            let mut area = egui::ScrollArea::vertical().id_salt("trace").auto_shrink([false, false]);
+            if let Some(r) = target.filter(|_| tester.scroll_target) {
+                area = area.vertical_scroll_offset((r as f32 * pitch - ui.available_height() / 2.0).max(0.0));
+                tester.scroll_target = false;
+            }
+            area.show_rows(ui, row_h, outcome.status.len(), |ui, range| {
+                for ri in range {
+                    let st = &outcome.status[ri];
+                    let row = egui::Rect::from_min_size(ui.available_rect_before_wrap().min, vec2(ui.available_width(), row_h));
+                    let is_target = target == Some(ri);
+                    if is_target {
+                        ui.painter().rect_filled(row, CornerRadius::same(5), target_bg);
+                    }
+                    let hovered = ui.rect_contains_pointer(row);
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), row_h), Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let label = RichText::new(format!("rule {}", ri + 1)).size(12.5).color(t.accent);
+                        let label = if is_target { label.strong() } else { label };
+                        let jump = ui.add_sized([52.0, row_h], egui::Label::new(label).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if jump.clicked() {
+                            acts.push(Act::Jump(ri));
+                        }
+                        let (state, detail, color) = match st {
+                            RuleStatus::Matched if outcome.fired.contains(&ri) => (format!("{} fired", ic::CHECK), String::new(), t.accent),
+                            RuleStatus::Matched => (format!("{} matched", ic::CHECK), "not used by the hit policy".to_string(), t.accent),
+                            RuleStatus::Failed(ci) => {
+                                let entry = tb.rules[ri].inputs.get(*ci).map(|e| one_line(&e.text)).unwrap_or_default();
+                                let val = outcome.inputs.get(*ci).map(|v| v.display()).unwrap_or_default();
+                                ("no match".to_string(), format!("{} = {val} does not satisfy {entry}", tb.inputs[*ci].title()), t.faint)
+                            }
+                            RuleStatus::Error(e) => ("error".to_string(), e.clone(), t.error_text),
+                        };
+                        ui.add_sized([76.0, row_h], egui::Label::new(RichText::new(state).size(12.5).color(color)));
+                        if hovered || is_target {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if small_button(ui, t, ic::FLASK, "Test this rule").clicked() {
+                                    acts.push(Act::TestRule(ri));
+                                }
+                                ui.add(egui::Label::new(RichText::new(detail).size(12.0).color(t.muted)).truncate());
+                            });
+                        } else {
+                            ui.add(egui::Label::new(RichText::new(detail).size(12.0).color(t.muted)).truncate());
+                        }
+                    });
+                }
+            });
         });
     });
+    if clear_target {
+        tests.clear_target();
+    }
+    if clear_expected {
+        tests.clear_expected();
+    }
+    if snapshot {
+        tests.snapshot();
+    }
+    if add_case {
+        tests.add_case(&tester.case_name);
+        tester.case_name.clear();
+    }
+}
+
+fn value_cell(ui: &mut egui::Ui, t: &Theme, v: &Value, bg: Color32, fg: Color32) {
+    if *v == Value::Null {
+        ui.label(RichText::new("null").font(FontId::monospace(13.0)).color(t.faint));
+    } else {
+        chip(ui, &v.display(), bg, fg);
+    }
 }
 
 impl eframe::App for App {

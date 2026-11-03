@@ -6,8 +6,28 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Expect {
+    #[default]
+    None,
+    Rule(usize),
+    Case(usize),
+    Snapshot(Vec<Value>),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Expected {
+    pub label: String,
+    pub values: Vec<Value>,
+}
+
+type ExpectedKey = (usize, Expect, Vec<String>, u64);
+
 #[derive(Default)]
 pub struct TestSession {
+    expect: Expect,
+    target: Option<usize>,
+    expected: Option<(ExpectedKey, Arc<Option<Expected>>)>,
     fields: Vec<String>,
     suite: Suite,
     suite_path: Option<PathBuf>,
@@ -53,7 +73,78 @@ impl TestSession {
         self.fields.iter().any(|f| !f.trim().is_empty())
     }
 
+    pub fn target(&self) -> Option<usize> {
+        self.target
+    }
+
+    pub fn clear_target(&mut self) {
+        self.target = None;
+        if matches!(self.expect, Expect::Rule(_)) {
+            self.expect = Expect::None;
+        }
+    }
+
+    pub fn clear_expected(&mut self) {
+        self.expect = Expect::None;
+    }
+
+    pub fn snapshot(&mut self, defs: &Definitions, decision: usize) {
+        let Some(o) = self.outcome(defs, decision) else { return };
+        let Some((t, _)) = table(defs, decision) else { return };
+        if o.error.is_none() {
+            self.expect = Expect::Snapshot((0..t.outputs.len()).map(|i| o.output(i)).collect());
+        }
+    }
+
+    pub fn expected(&mut self, defs: &Definitions, decision: usize) -> Arc<Option<Expected>> {
+        let key = (decision, self.expect.clone(), self.fields.clone(), self.suite_gen);
+        if let Some((k, e)) = &self.expected
+            && *k == key
+        {
+            return e.clone();
+        }
+        let e = Arc::new(self.build_expected(defs, decision));
+        self.expected = Some((key, e.clone()));
+        e
+    }
+
+    fn build_expected(&self, defs: &Definitions, decision: usize) -> Option<Expected> {
+        let (t, _) = table(defs, decision)?;
+        match &self.expect {
+            Expect::None => None,
+            Expect::Snapshot(values) => Some(Expected { label: "the saved result".into(), values: values.clone() }),
+            Expect::Case(i) => {
+                let c = self.suite.cases.get(*i).filter(|c| !c.expect_error)?;
+                let values = t
+                    .outputs
+                    .iter()
+                    .map(|o| c.expected.get(&o.name).or_else(|| c.expected.get(&o.label)).map(|j| suite::json_to_value(j, o.type_ref.as_deref())).unwrap_or(Value::Null))
+                    .collect();
+                Some(Expected { label: format!("case \"{}\"", c.name), values })
+            }
+            Expect::Rule(r) => {
+                let values = (*r < t.rules.len()).then(|| eval::rule_outputs(t, *r, &self.context(t)).ok()).flatten()?;
+                Some(Expected { label: format!("rule {} outputs", r + 1), values })
+            }
+        }
+    }
+
+    fn shift_expect(&mut self, deleted: usize) {
+        self.expect = match self.expect {
+            Expect::Case(i) if i == deleted => Expect::None,
+            Expect::Case(i) if i > deleted => Expect::Case(i - 1),
+            ref other => other.clone(),
+        };
+    }
+
+    fn forget_case_expect(&mut self) {
+        if matches!(self.expect, Expect::Case(_)) {
+            self.expect = Expect::None;
+        }
+    }
+
     pub fn invalidate(&mut self) {
+        self.expected = None;
         self.live = None;
         self.results = None;
     }
@@ -107,6 +198,7 @@ impl TestSession {
         let case = case_from_outcome(name, t, self.inputs_json(t), &outcome);
         self.claim_suite(decision_name);
         self.suite.cases.push(case);
+        self.expect = Expect::Case(self.suite.cases.len() - 1);
         self.suite_gen += 1;
     }
 
@@ -121,12 +213,15 @@ impl TestSession {
     pub fn delete(&mut self, i: usize) {
         if i < self.suite.cases.len() {
             self.suite.cases.remove(i);
+            self.shift_expect(i);
             self.suite_gen += 1;
         }
     }
 
     pub fn fill_from_case(&mut self, defs: &Definitions, decision: usize, i: usize) {
         let (Some((t, _)), Some(case)) = (table(defs, decision), self.suite.cases.get(i)) else { return };
+        self.expect = Expect::Case(i);
+        self.target = None;
         self.fields = t
             .inputs
             .iter()
@@ -157,6 +252,8 @@ impl TestSession {
                 other => Some(other.to_string()),
             })
         };
+        self.target = Some(rule);
+        self.expect = Expect::Rule(rule);
         self.fields = values
             .into_iter()
             .enumerate()
@@ -173,6 +270,7 @@ impl TestSession {
 
     pub fn new_suite(&mut self, decision_name: &str) {
         self.suite = Suite { decision: decision_name.to_string(), cases: vec![] };
+        self.forget_case_expect();
         self.suite_gen += 1;
         self.suite_path = None;
     }
@@ -181,6 +279,7 @@ impl TestSession {
         let s = suite::load(path)?;
         let n = s.cases.len();
         self.suite = s;
+        self.forget_case_expect();
         self.suite_gen += 1;
         self.suite_path = Some(path.to_path_buf());
         Ok(n)

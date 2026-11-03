@@ -901,6 +901,20 @@ fn priority_key(t: &DecisionTable, row: &[Value]) -> Vec<usize> {
         .collect()
 }
 
+pub fn rule_outputs(t: &DecisionTable, ri: usize, vars: &Context) -> Result<Vec<Value>, String> {
+    let r = &t.rules[ri];
+    let mut row = Vec::with_capacity(t.outputs.len());
+    for (oi, out) in t.outputs.iter().enumerate() {
+        let Some(e) = r.outputs.get(oi).filter(|e| !e.is_any()) else {
+            row.push(Value::Null);
+            continue;
+        };
+        let v = mode_of(&e.lang).and_then(|m| run(&e.text, m, vars, BTreeMap::new())).and_then(|v| v.coerce(out.type_ref.as_deref())).map_err(|err| format!("output \"{}\": {err}", out.title()))?;
+        row.push(v);
+    }
+    Ok(row)
+}
+
 static NULL: Value = Value::Null;
 
 pub fn evaluate(t: &DecisionTable, vars: &Context) -> Outcome {
@@ -957,27 +971,13 @@ pub fn evaluate(t: &DecisionTable, vars: &Context) -> Outcome {
 
     let mut rows = Vec::new();
     for &ri in &to_eval {
-        let r = &t.rules[ri];
-        let mut row = Vec::new();
-        for (oi, out) in t.outputs.iter().enumerate() {
-            let Some(e) = r.outputs.get(oi) else {
-                row.push(Value::Null);
-                continue;
-            };
-            if e.is_any() {
-                row.push(Value::Null);
-                continue;
-            }
-            let res = mode_of(&e.lang).and_then(|m| run(&e.text, m, vars, BTreeMap::new())).and_then(|v| v.coerce(out.type_ref.as_deref()));
-            match res {
-                Ok(v) => row.push(v),
-                Err(err) => {
-                    o.error = Some(format!("Rule {} output \"{}\": {err}", ri + 1, out.title()));
-                    return o;
-                }
+        match rule_outputs(t, ri, vars) {
+            Ok(row) => rows.push((ri, row)),
+            Err(err) => {
+                o.error = Some(format!("Rule {} {err}", ri + 1));
+                return o;
             }
         }
-        rows.push((ri, row));
     }
 
     match hp.as_str() {
