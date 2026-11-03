@@ -2421,7 +2421,6 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                     if is_target {
                         ui.painter().rect_filled(row, CornerRadius::same(5), target_bg);
                     }
-                    let hovered = ui.rect_contains_pointer(row);
                     ui.allocate_ui_with_layout(vec2(ui.available_width(), row_h), Layout::left_to_right(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let label = RichText::new(format!("rule {}", ri + 1)).size(12.5).color(t.accent);
@@ -2441,15 +2440,12 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                             RuleStatus::Error(e) => ("error".to_string(), e.clone(), t.error_text),
                         };
                         ui.add_sized([76.0, row_h], egui::Label::new(RichText::new(state).size(12.5).color(color)));
-                        if hovered || is_target {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if small_button(ui, t, ic::FLASK, "Test this rule").clicked() {
-                                    acts.push(Act::TestRule(ri));
-                                }
-                                ui.add(egui::Label::new(RichText::new(detail).size(12.0).color(t.muted)).truncate());
-                            });
-                        } else {
+                        let detail_w = (ui.available_width() - 118.0 - ui.spacing().item_spacing.x).max(40.0);
+                        ui.allocate_ui_with_layout(vec2(detail_w, row_h), Layout::left_to_right(Align::Center), |ui| {
                             ui.add(egui::Label::new(RichText::new(detail).size(12.0).color(t.muted)).truncate());
+                        });
+                        if small_button(ui, t, ic::FLASK, "Test this rule").clicked() {
+                            acts.push(Act::TestRule(ri));
                         }
                     });
                 }
@@ -2475,7 +2471,7 @@ fn value_cell(ui: &mut egui::Ui, t: &Theme, v: &Value, bg: Color32, fg: Color32)
     if *v == Value::Null {
         ui.label(RichText::new("null").font(FontId::monospace(13.0)).color(t.faint));
     } else {
-        chip(ui, &v.display(), bg, fg);
+        badge_shape(ui, v.display(), BadgeShape { font: FontId::monospace(11.5), pad: 7.0, height: 22.0, radius: 5, max_w: 420.0 }, bg, fg);
     }
 }
 
