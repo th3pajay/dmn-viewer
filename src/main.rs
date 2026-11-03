@@ -2265,7 +2265,15 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
     let mut snapshot = false;
     let mut clear_expected = false;
     let mut clear_target = false;
-    let step = ui.input_mut(|i| if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown) { 1 } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp) { -1 } else { 0 });
+    let step = ui.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown) {
+            1
+        } else if i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp) {
+            -1
+        } else {
+            0
+        }
+    });
     if step != 0 && !tb.rules.is_empty() {
         let next = target.map_or(0, |r| r.saturating_add_signed(step).min(tb.rules.len() - 1));
         acts.push(Act::TestRule(next));

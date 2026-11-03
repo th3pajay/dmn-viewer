@@ -115,11 +115,8 @@ impl TestSession {
             Expect::Snapshot(values) => Some(Expected { label: "the saved result".into(), values: values.clone() }),
             Expect::Case(i) => {
                 let c = self.suite.cases.get(*i).filter(|c| !c.expect_error)?;
-                let values = t
-                    .outputs
-                    .iter()
-                    .map(|o| c.expected.get(&o.name).or_else(|| c.expected.get(&o.label)).map(|j| suite::json_to_value(j, o.type_ref.as_deref())).unwrap_or(Value::Null))
-                    .collect();
+                let values =
+                    t.outputs.iter().map(|o| c.expected.get(&o.name).or_else(|| c.expected.get(&o.label)).map(|j| suite::json_to_value(j, o.type_ref.as_deref())).unwrap_or(Value::Null)).collect();
                 Some(Expected { label: format!("case \"{}\"", c.name), values })
             }
             Expect::Rule(r) => {
