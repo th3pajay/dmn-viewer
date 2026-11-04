@@ -1,11 +1,5 @@
-//! Command-line file targeting: a directory or a glob pattern (`*`, `?`, `**`) stands for the
-//! files it matches. Patterns are expanded here, once, since Windows shells pass them through.
-
 use std::path::{Path, PathBuf};
 
-/// `None` when `arg` is a plain path, to be used as given. Otherwise the matching files, sorted
-/// (empty when nothing matches): a directory gives every `.dmn` file below it. Paths keep the
-/// pattern's own spelling and separator.
 pub fn expand(arg: &str) -> Option<Vec<String>> {
     let sep = if arg.contains('\\') { '\\' } else { '/' };
     let mut out = Vec::new();
@@ -42,7 +36,6 @@ fn walk(dir: &Path, shown: &str, sep: char, segs: &[&str], out: &mut Vec<String>
     for e in entries.flatten() {
         let (Ok(ft), name) = (e.file_type(), e.file_name()) else { continue };
         let Some(name) = name.to_str() else { continue };
-        // Like most shells, wildcards skip hidden entries unless the pattern names the dot.
         if name.starts_with('.') && !seg.starts_with('.') {
             continue;
         }
@@ -69,7 +62,6 @@ fn walk(dir: &Path, shown: &str, sep: char, segs: &[&str], out: &mut Vec<String>
     }
 }
 
-/// `*` matches any run of characters, `?` any one; case-insensitive on Windows, like its file names.
 pub fn matches(pattern: &str, name: &str) -> bool {
     let fold = |c: char| if cfg!(windows) { c.to_ascii_lowercase() } else { c };
     let p: Vec<char> = pattern.chars().map(fold).collect();

@@ -5,7 +5,6 @@ use dmn_viewer::suite::{Case, Suite};
 use dmn_viewer::{lint, parse};
 use std::collections::HashSet;
 
-/// A FIRST table with one of every fixable problem, plus a placeholder that needs a person.
 fn table_xml(hit_policy: &str, rules: &[(&str, [&str; 4], [&str; 2])]) -> String {
     let mut x = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -95,7 +94,6 @@ fn the_queue_puts_errors_first_and_deletions_last() {
             ("UNUSED_INPUT", vec![], true),
         ]
     );
-    // The placeholder is listed by lint but has no automatic fix.
     let d = defs(&messy());
     assert!(lint::lint(&d).iter().any(|i| i.code == "PLACEHOLDER"));
     assert!(q.iter().all(|c| c.issue.code != "PLACEHOLDER"));
@@ -121,7 +119,6 @@ fn each_fix_produces_the_expected_text() {
     assert_eq!(after(allowed, 0).table(0).unwrap().inputs[0].input_values.as_deref(), Some(r#""EU","NA","APAC","LATAM""#));
     assert_eq!(after(allowed, 1).table(0).unwrap().rules[2].inputs[0].text, r#""NA""#);
 
-    // Shadowed by a different rule: moving it up is offered first; identical conditions: only deleting.
     let shadowed = find(&q, "UNREACHABLE_RULE", 6);
     assert_eq!((shadowed.default_fix(), shadowed.fixes.len()), (Some(0), 2));
     assert_eq!(after(shadowed, 0).table(0).unwrap().rules[4].id, "R7");
@@ -134,7 +131,6 @@ fn each_fix_produces_the_expected_text() {
     assert_eq!(defs(&out).table(0).unwrap().rules[2].id, "R2_2");
     assert_eq!(out.replacen("R2_2", "R2", 1), xml, "only the second id changes");
 
-    // Every fix describes itself as from → to lines.
     for c in &q {
         for f in &c.fixes {
             let lines: Vec<_> = f.edits.iter().flat_map(|e| fix::describe(&d, e)).collect();
@@ -162,14 +158,11 @@ fn keys_survive_renumbering_and_tell_duplicate_ids_apart() {
     let xml = messy();
     let q = queue(&xml, &HashSet::new());
     let shadowed = find(&q, "UNREACHABLE_RULE", 6).key.clone();
-    // Deleting rule 4 makes rule 7 rule 6; its key stays the same.
     let after = apply(&xml, &Edit::DeleteRule { decision: 0, rule: 3 }).unwrap();
     let q2 = queue(&after, &HashSet::new());
     assert_eq!(find(&q2, "UNREACHABLE_RULE", 5).key, shadowed);
-    // A skipped issue stays out of the queue.
     let skipped: HashSet<String> = [shadowed].into();
     assert!(queue(&after, &skipped).iter().all(|c| !(c.issue.code == "UNREACHABLE_RULE" && c.issue.rules[0] == 5)));
-    // Rules 2 and 3 share the id R2, so their keys carry the position.
     let allowed = find(&q, "NOT_IN_ALLOWED_VALUES", 2);
     assert!(allowed.key.contains("|R2#2"), "{}", allowed.key);
     assert_ne!(find(&q, "NON_FEEL_SYNTAX", 1).key, allowed.key);
@@ -231,8 +224,6 @@ fn test_effect_shows_broken_fixed_and_changed_cases() {
     assert_eq!(fx.fixed, vec!["APAC heavy".to_string()]);
     assert!(fx.broken.is_empty() && fx.changed.is_empty());
 
-    // Failing before and after, for a different reason: a light APAC parcel gets FEDEX from rule 5,
-    // and REVIEW once rule 5 is deleted.
     suite.cases = vec![case("APAC light", "APAC", 1.0, "FREIGHT")];
     let deleted = defs(&apply(&xml, &Edit::DeleteRule { decision: 0, rule: 4 }).unwrap());
     let fx = fix::test_effect(&before, &deleted, 0, &suite).unwrap();
@@ -273,7 +264,6 @@ fn renaming_duplicate_ids_skips_ids_in_use() {
 
 #[test]
 fn cell_fixes_keep_a_rule_column_shape() {
-    // A FEEL input entry with a method call can only be switched to JavaScript.
     let xml = table_xml("FIRST", &[("A", [r#"Region.startsWith("E")"#, "-", r#""z""#, "-"], [r#""1""#, r#""2""#]), ("B", ["-", "-", "-", "-"], [r#""1""#, r#""2""#])]);
     let q = queue(&xml, &HashSet::new());
     let c = find(&q, "NON_FEEL_SYNTAX", 0);

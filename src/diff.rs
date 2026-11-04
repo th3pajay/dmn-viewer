@@ -1,20 +1,11 @@
-//! What changed between a saved text and its edited version, as hunks of whole lines.
-//!
-//! An editor records each edit in `Spans`, the regions it touched since the last save. `hunks`
-//! then only compares inside those regions, so reviewing a few edits in a large file never diffs
-//! the whole file.
-
 use std::ops::Range;
 
-/// A region of the saved text (`old`) and the current text (`new`) that may differ.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub old: Range<usize>,
     pub new: Range<usize>,
 }
 
-/// Where the current text may differ from the saved one: sorted, disjoint spans. Outside them
-/// the two texts are equal byte for byte.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Spans(Vec<Span>);
 
@@ -27,15 +18,12 @@ impl Spans {
         &self.0
     }
 
-    /// Records an edit of the current text: the `removed` bytes at `at` were replaced by
-    /// `inserted` bytes. Spans the edit touches merge into one; later spans move along.
     pub fn splice(&mut self, at: usize, removed: usize, inserted: usize) {
         let end = at + removed;
         let v = &mut self.0;
         let first = v.partition_point(|s| s.new.end < at);
         let last = v.partition_point(|s| s.new.start <= end);
         let growth = |s: &Span| s.new.len() as isize - s.old.len() as isize;
-        // How far the current text has moved against the saved one before a point outside any span.
         let before: isize = v[..first].iter().map(growth).sum();
         let through = before + v[first..last].iter().map(growth).sum::<isize>();
         let (start, stop) = if first < last { (v[first].new.start.min(at), v[last - 1].new.end.max(end)) } else { (at, end) };
@@ -48,23 +36,19 @@ impl Spans {
         v.splice(first..last, [merged]);
     }
 
-    /// Whether these spans really describe the two texts (see `hunks`).
     pub fn describe(&self, saved: &str, current: &str) -> bool {
         consistent(saved, current, &self.0)
     }
 }
 
-/// One change, widened to whole lines: `old` in the saved text, `new` in the current text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hunk {
     pub old: Range<usize>,
     pub new: Range<usize>,
-    /// 1-based line numbers where `old` and `new` start.
     pub old_line: usize,
     pub new_line: usize,
 }
 
-/// The differing middle of two texts: (start, end in `a`, end in `b`), on char boundaries.
 pub fn changed(a: &str, b: &str) -> (usize, usize, usize) {
     let (x, y) = (a.as_bytes(), b.as_bytes());
     let mut p = x.iter().zip(y).take_while(|(c, d)| c == d).count();
@@ -79,8 +63,6 @@ pub fn changed(a: &str, b: &str) -> (usize, usize, usize) {
     (p, x.len() - s, y.len() - s)
 }
 
-/// Whether `spans` really describe the two texts: in bounds, on char boundaries, and equal
-/// outside. A cheap byte comparison that keeps a bookkeeping slip from showing a wrong diff.
 fn consistent(saved: &str, current: &str, spans: &[Span]) -> bool {
     let (mut o, mut n) = (0, 0);
     for s in spans {
@@ -104,10 +86,6 @@ fn at_line_start(t: &str, p: usize) -> bool {
     p == 0 || t.as_bytes()[p - 1] == b'\n'
 }
 
-/// The changes from `saved` to `current`, in order, each widened to whole lines and then split
-/// into the runs of lines that really differ (see `line_diff`). Edits on the same line share a
-/// hunk. Spans whose text came out equal (an edit and its undo) give none.
-/// If `spans` do not describe the texts, the whole differing middle is compared instead.
 pub fn hunks(saved: &str, current: &str, spans: &Spans) -> Vec<Hunk> {
     let fallback;
     let spans = if consistent(saved, current, &spans.0) {
@@ -117,7 +95,6 @@ pub fn hunks(saved: &str, current: &str, spans: &Spans) -> Vec<Hunk> {
         fallback = [Span { old: p..ea, new: p..eb }];
         &fallback[..]
     };
-    // Narrow each span to the bytes that really differ.
     let narrowed: Vec<Span> = spans
         .iter()
         .filter_map(|s| {
@@ -135,7 +112,6 @@ pub fn hunks(saved: &str, current: &str, spans: &Spans) -> Vec<Hunk> {
     while i < narrowed.len() {
         let mut g = narrowed[i].clone();
         i += 1;
-        // Spans with no line break between them belong to the same lines.
         while let Some(next) = narrowed.get(i).filter(|s| !current[g.new.end..s.new.start].contains('\n')) {
             (g.old.end, g.new.end) = (next.old.end, next.new.end);
             i += 1;
@@ -154,8 +130,6 @@ pub fn hunks(saved: &str, current: &str, spans: &Spans) -> Vec<Hunk> {
     out
 }
 
-/// Splits a hunk into the lines that really changed. A structural edit (a column added to
-/// every rule, say) is one span from its first to its last byte; most lines inside it are equal.
 fn refine(saved: &str, current: &str, h: Hunk, out: &mut Vec<Hunk>) {
     let a: Vec<&str> = saved[h.old.clone()].split_inclusive('\n').collect();
     let b: Vec<&str> = current[h.new.clone()].split_inclusive('\n').collect();
@@ -178,9 +152,6 @@ fn refine(saved: &str, current: &str, h: Hunk, out: &mut Vec<Hunk>) {
     }
 }
 
-/// The changed runs of lines between `a` and `b`, in order, as (lines of `a`, lines of `b`).
-/// Patience diff: lines that occur once on each side anchor the match, and the gaps between
-/// anchors are diffed the same way, so it stays near-linear on large, mostly equal regions.
 pub fn line_diff(a: &[&str], b: &[&str]) -> Vec<(Range<usize>, Range<usize>)> {
     let mut out = Vec::new();
     gap(a, b, 0..a.len(), 0..b.len(), 0, &mut out);
@@ -197,7 +168,6 @@ fn emit(out: &mut Vec<(Range<usize>, Range<usize>)>, ra: Range<usize>, rb: Range
     }
 }
 
-/// Above this many cells, a gap without anchors is reported as one change instead of diffed.
 const LCS_CELLS: usize = 1 << 18;
 
 fn gap(a: &[&str], b: &[&str], mut ra: Range<usize>, mut rb: Range<usize>, depth: u32, out: &mut Vec<(Range<usize>, Range<usize>)>) {
@@ -210,7 +180,6 @@ fn gap(a: &[&str], b: &[&str], mut ra: Range<usize>, mut rb: Range<usize>, depth
     if ra.is_empty() || rb.is_empty() {
         return emit(out, ra, rb);
     }
-    // Lines that occur exactly once in each side: (count in a, count in b, position in a, in b).
     let mut seen: std::collections::HashMap<&str, (u32, u32, usize, usize)> = std::collections::HashMap::with_capacity(ra.len() + rb.len());
     for i in ra.clone() {
         let e = seen.entry(a[i]).or_default();
@@ -235,9 +204,8 @@ fn gap(a: &[&str], b: &[&str], mut ra: Range<usize>, mut rb: Range<usize>, depth
     gap(a, b, pa..ra.end, pb..rb.end, depth + 1, out);
 }
 
-/// The longest run of anchors (sorted by position in `a`) whose positions in `b` also increase.
 fn increasing(anchors: &[(usize, usize)]) -> Vec<(usize, usize)> {
-    let mut tails: Vec<usize> = Vec::new(); // index into anchors of the smallest tail per length
+    let mut tails: Vec<usize> = Vec::new();
     let mut prev = vec![usize::MAX; anchors.len()];
     for (k, &(_, y)) in anchors.iter().enumerate() {
         let len = tails.partition_point(|&t| anchors[t].1 < y);
@@ -260,7 +228,6 @@ fn increasing(anchors: &[(usize, usize)]) -> Vec<(usize, usize)> {
     run
 }
 
-/// Exact longest-common-subsequence diff for a small gap without anchors (e.g. repeated lines).
 fn lcs(a: &[&str], b: &[&str], ra: Range<usize>, rb: Range<usize>, out: &mut Vec<(Range<usize>, Range<usize>)>) {
     let (n, m) = (ra.len(), rb.len());
     if n * m > LCS_CELLS {
@@ -288,7 +255,6 @@ fn lcs(a: &[&str], b: &[&str], ra: Range<usize>, rb: Range<usize>, out: &mut Vec
     emit(out, ra.start + si..ra.end, rb.start + sj..rb.end);
 }
 
-/// Lines a hunk side holds; a last line without a line break counts too.
 pub fn line_count(s: &str) -> usize {
     newlines(s) + usize::from(!s.is_empty() && !s.ends_with('\n'))
 }

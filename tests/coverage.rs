@@ -30,7 +30,6 @@ fn the_example_suite_covers_every_rule() {
 fn counts_cases_per_rule_and_rules_fired_only_by_failing_cases() {
     let defs = defs();
     let mut s = suite::load(&example("shipping-fees.tests.json")).unwrap();
-    // Keep: two passing cases on rule 1, one on rule 2, and the NA express case (rule 4) made to fail.
     s.cases.retain(|c| ["EU small parcel", "EU parcel at the 5 kg boundary", "EU medium parcel", "NA express"].contains(&c.name.as_str()));
     s.cases[3].expected.insert("Fee".into(), json!(1));
     let cov = coverage(&defs, &s);

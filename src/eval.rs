@@ -1,7 +1,8 @@
 use crate::model::*;
 use crate::unary::split_top;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -125,6 +126,7 @@ enum Tok {
     Num(f64),
     Id(String),
     Op(&'static str),
+    Regex(String, String),
     Eof,
 }
 
@@ -170,6 +172,29 @@ fn lex(src: &str, mode: Mode) -> Result<Vec<Tok>, String> {
                 i += 1;
             }
             i += 2;
+            continue;
+        }
+        if mode == Mode::Js && ch == '/' && matches!(out.last(), None | Some(Tok::Op("(" | "," | "=" | ":" | "?" | "&&" | "||" | "!" | ";" | "{"))) {
+            let mut body = String::new();
+            i += 1;
+            loop {
+                let Some(&x) = c.get(i) else { return Err("unterminated regular expression".into()) };
+                i += 1;
+                if x == '/' {
+                    break;
+                }
+                body.push(x);
+                if x == '\\' {
+                    let Some(&e) = c.get(i) else { return Err("unterminated regular expression".into()) };
+                    i += 1;
+                    body.push(e);
+                }
+            }
+            let start = i;
+            while i < c.len() && c[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            out.push(Tok::Regex(body, c[start..i].iter().collect()));
             continue;
         }
         if ch == '"' || ch == '\'' {
@@ -248,6 +273,7 @@ enum Expr {
     Call(String, Vec<Expr>),
     Method(Box<Expr>, String, Vec<Expr>),
     Prop(Box<Expr>, String),
+    Regex(String, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -408,6 +434,9 @@ impl Parser {
         if self.eat_op("-") {
             return Ok(Expr::Neg(Box::new(self.unary()?)));
         }
+        if self.mode != Mode::Feel && self.eat_op("+") {
+            return Ok(Expr::Neg(Box::new(Expr::Neg(Box::new(self.unary()?)))));
+        }
         if self.mode != Mode::Feel && (self.eat_op("!") || (self.mode == Mode::Juel && self.eat_kw("not"))) {
             return Ok(Expr::Not(Box::new(self.unary()?)));
         }
@@ -446,7 +475,9 @@ impl Parser {
         match self.next() {
             Tok::Num(n) => Ok(Expr::Lit(Value::Num(n))),
             Tok::Str(s) => Ok(Expr::Lit(Value::Str(s))),
+            Tok::Regex(p, f) => Ok(Expr::Regex(p, f.contains('g'))),
             Tok::Id(s) => match s.as_str() {
+                "new" if self.mode == Mode::Js => self.primary(),
                 "true" => Ok(Expr::Lit(Value::Bool(true))),
                 "false" => Ok(Expr::Lit(Value::Bool(false))),
                 "null" | "undefined" => Ok(Expr::Lit(Value::Null)),
@@ -469,6 +500,7 @@ fn describe(t: &Tok) -> String {
         Tok::Num(n) => format!("number {}", fmt_num(*n)),
         Tok::Id(s) => format!("'{s}'"),
         Tok::Op(o) => format!("'{o}'"),
+        Tok::Regex(p, _) => format!("regular expression /{p}/"),
         Tok::Eof => "end of expression".into(),
     }
 }
@@ -476,6 +508,7 @@ fn describe(t: &Tok) -> String {
 struct Env<'a> {
     vars: &'a Context,
     locals: BTreeMap<String, Value>,
+    input: Option<(&'a str, &'a Value)>,
     mode: Mode,
 }
 
@@ -545,6 +578,11 @@ fn string_method(s: &str, m: &str, args: &[Value], mode: Mode) -> Result<Value, 
         "includes" | "contains" => Value::Bool(s.contains(&arg_str(args, 0))),
         "startsWith" => Value::Bool(s.starts_with(&arg_str(args, 0))),
         "endsWith" => Value::Bool(s.ends_with(&arg_str(args, 0))),
+        "compareTo" if mode == Mode::Juel => {
+            let other = chars(&arg_str(args, 0));
+            let diff = c.iter().zip(&other).find(|(a, b)| a != b).map_or(len as f64 - other.len() as f64, |(a, b)| *a as u32 as f64 - *b as u32 as f64);
+            Value::Num(diff)
+        }
         "equals" => Value::Bool(args.first().is_some_and(|v| *v == Value::Str(s.to_string()))),
         "replace" => Value::Str(s.replacen(&arg_str(args, 0), &arg_str(args, 1), 1)),
         "replaceAll" => Value::Str(s.replace(&arg_str(args, 0), &arg_str(args, 1))),
@@ -583,7 +621,7 @@ fn eval(e: &Expr, env: &mut Env) -> Result<Value, String> {
     let mode = env.mode;
     match e {
         Expr::Lit(v) => Ok(v.clone()),
-        Expr::Var(n) => match env.locals.get(n).or_else(|| env.vars.get(n)) {
+        Expr::Var(n) => match env.locals.get(n).or_else(|| env.input.filter(|(k, _)| *k == n).map(|(_, v)| v)).or_else(|| env.vars.get(n)) {
             Some(v) => Ok(v.clone()),
             None => match mode {
                 Mode::Feel => Ok(Value::Null),
@@ -635,6 +673,23 @@ fn eval(e: &Expr, env: &mut Env) -> Result<Value, String> {
                     "FEEL has no method calls: '.{m}(...)' is JavaScript/Java syntax. Set expressionLanguage=\"javascript\" on this cell or use FEEL functions such as substring(x, start, length)"
                 ));
             }
+            if mode == Mode::Js
+                && m == "UTC"
+                && let Expr::Var(n) = &**recv
+                && n == "Date"
+            {
+                let a = args.iter().map(|a| eval(a, env).map(|v| v.js_number())).collect::<Result<Vec<_>, _>>()?;
+                return Ok(Value::Num(date_utc(&a)));
+            }
+            if mode == Mode::Js
+                && matches!(m.as_str(), "replace" | "replaceAll")
+                && let Some(Expr::Regex(pat, global)) = args.first()
+            {
+                let Value::Str(s) = eval(recv, env)? else { return Err(format!("TypeError: {m}() needs a string")) };
+                let from = regex_literal(pat)?;
+                let to = args.get(1).map(|a| eval(a, env)).transpose()?.map(|v| v.js_string()).unwrap_or_else(|| "undefined".into());
+                return Ok(Value::Str(if *global || m == "replaceAll" { s.replace(&from, &to) } else { s.replacen(&from, &to, 1) }));
+            }
             let r = eval(recv, env)?;
             let args = args.iter().map(|a| eval(a, env)).collect::<Result<Vec<_>, _>>()?;
             match r {
@@ -646,12 +701,14 @@ fn eval(e: &Expr, env: &mut Env) -> Result<Value, String> {
                 Value::Num(n) => match m.as_str() {
                     "toString" => Ok(Value::Str(fmt_num(n))),
                     "toFixed" => Ok(Value::Str(format!("{:.*}", js_index(args.first(), 20, 0), n))),
+                    "toISOString" if mode == Mode::Js => iso_string(n).map(Value::Str),
                     _ => Err(format!("unsupported number method {m}()")),
                 },
                 Value::Bool(b) if m == "toString" => Ok(Value::Str(b.to_string())),
                 v => Err(format!("TypeError: {}.{m} is not a function", v.type_name())),
             }
         }
+        Expr::Regex(p, _) => Err(format!("regular expression /{p}/ is only supported as the first argument of replace() in the tester")),
         Expr::Prop(recv, p) => {
             let r = eval(recv, env)?;
             match (&r, p.as_str()) {
@@ -728,6 +785,65 @@ pub(crate) fn binop(op: &str, a: &Value, b: &Value, mode: Mode) -> Result<Value,
     }
 }
 
+fn regex_literal(pat: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut it = pat.chars();
+    while let Some(ch) = it.next() {
+        match ch {
+            '\\' => match it.next() {
+                Some(e) if e.is_ascii_punctuation() => out.push(e),
+                _ => return Err(format!("regular expression /{pat}/ is not supported by the tester, only literal text")),
+            },
+            '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}' => return Err(format!("regular expression /{pat}/ is not supported by the tester, only literal text")),
+            c => out.push(c),
+        }
+    }
+    Ok(out)
+}
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + (m <= 2) as i64, m, d)
+}
+
+fn date_utc(a: &[f64]) -> f64 {
+    let at = |i: usize, default: f64| a.get(i).copied().unwrap_or(default);
+    let parts = [at(0, f64::NAN), at(1, 0.0), at(2, 1.0), at(3, 0.0), at(4, 0.0), at(5, 0.0), at(6, 0.0)];
+    if parts.iter().any(|p| !p.is_finite()) {
+        return f64::NAN;
+    }
+    let [y, mo, d, h, mi, s, ms] = parts.map(f64::trunc);
+    let (y, mo) = (y as i64 + (mo as i64).div_euclid(12), (mo as i64).rem_euclid(12));
+    let days = days_from_civil(y, mo + 1, 1) as f64 + d - 1.0;
+    ((days * 24.0 + h) * 60.0 + mi) * 60_000.0 + s * 1000.0 + ms
+}
+
+fn iso_string(ms: f64) -> Result<String, String> {
+    if !ms.is_finite() {
+        return Err("RangeError: Invalid time value".into());
+    }
+    let ms = ms as i64;
+    let (y, m, d) = civil_from_days(ms.div_euclid(86_400_000));
+    let t = ms.rem_euclid(86_400_000);
+    Ok(format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z", t / 3_600_000, t / 60_000 % 60, t / 1000 % 60, t % 1000))
+}
+
 fn call(name: &str, a: &[Value], mode: Mode) -> Result<Value, String> {
     let s = |i: usize| match a.get(i) {
         Some(Value::Str(s)) => Some(s.clone()),
@@ -779,6 +895,10 @@ fn call(name: &str, a: &[Value], mode: Mode) -> Result<Value, String> {
             Some(Value::Bool(b)) => Value::Bool(!b),
             _ => Value::Null,
         }),
+        (Mode::Js, "Date") => match a {
+            [Value::Num(ms)] => Ok(Value::Num(*ms)),
+            _ => Err("the tester supports new Date(milliseconds) and Date.UTC(...) only".into()),
+        },
         (Mode::Js, "String") => Ok(Value::Str(a.first().map(|v| v.js_string()).unwrap_or_default())),
         (Mode::Js, "Number") => Ok(Value::Num(a.first().map(|v| v.js_number()).unwrap_or(0.0))),
         (Mode::Js, "parseInt") => Ok(Value::Num(a.first().map(|v| v.js_number().trunc()).unwrap_or(f64::NAN))),
@@ -787,7 +907,6 @@ fn call(name: &str, a: &[Value], mode: Mode) -> Result<Value, String> {
     }
 }
 
-// Plain literals evaluate the same in every mode; skipping lex/parse for them covers most table cells.
 pub(crate) fn literal(src: &str, mode: Mode) -> Option<Value> {
     let s = src.trim();
     match s {
@@ -810,6 +929,11 @@ pub(crate) fn literal(src: &str, mode: Mode) -> Option<Value> {
     Some(Value::Num(if digits.len() < s.len() { -n } else { n }))
 }
 
+pub(crate) fn juel_body(src: &str) -> &str {
+    let s = src.trim();
+    s.strip_prefix("${").or_else(|| s.strip_prefix("#{")).and_then(|x| x.strip_suffix('}')).map_or(src, str::trim)
+}
+
 pub fn run(src: &str, mode: Mode, vars: &Context, locals: BTreeMap<String, Value>) -> Result<Value, String> {
     match literal(src, mode) {
         Some(v) => Ok(v),
@@ -817,8 +941,35 @@ pub fn run(src: &str, mode: Mode, vars: &Context, locals: BTreeMap<String, Value
     }
 }
 
+const PROGRAM_CACHE_LIMIT: usize = 512;
+
+type Compiled = Rc<Result<Program, String>>;
+
+thread_local! {
+    static PROGRAMS: std::cell::RefCell<[HashMap<String, Compiled>; 3]> = std::cell::RefCell::new(Default::default());
+}
+
+fn cached_program(src: &str, mode: Mode) -> Compiled {
+    PROGRAMS.with(|c| {
+        let mut c = c.borrow_mut();
+        let m = &mut c[mode as usize];
+        if let Some(p) = m.get(src) {
+            return p.clone();
+        }
+        if m.len() >= PROGRAM_CACHE_LIMIT {
+            m.clear();
+        }
+        let p = Rc::new(Program::compile(src, mode));
+        m.insert(src.to_string(), p.clone());
+        p
+    })
+}
+
 fn run_program(src: &str, mode: Mode, vars: &Context, locals: BTreeMap<String, Value>) -> Result<Value, String> {
-    Program::compile(src, mode)?.exec(vars, locals)
+    match &*cached_program(src, mode) {
+        Ok(p) => p.exec(vars, locals, None),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -829,12 +980,13 @@ pub(crate) struct Program {
 
 impl Program {
     pub(crate) fn compile(src: &str, mode: Mode) -> Result<Program, String> {
+        let src = if mode == Mode::Juel { juel_body(src) } else { src };
         let mut p = Parser { t: lex(src, mode)?, i: 0, mode };
         Ok(Program { stmts: p.program()?, mode })
     }
 
-    pub(crate) fn exec(&self, vars: &Context, locals: BTreeMap<String, Value>) -> Result<Value, String> {
-        let mut env = Env { vars, locals, mode: self.mode };
+    pub(crate) fn exec(&self, vars: &Context, locals: BTreeMap<String, Value>, input: Option<(&str, &Value)>) -> Result<Value, String> {
+        let mut env = Env { vars, locals, input, mode: self.mode };
         let mut last = Value::Null;
         for s in &self.stmts {
             match s {

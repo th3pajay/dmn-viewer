@@ -97,7 +97,6 @@ fn errors_surface_when_matching() {
     assert_eq!(unsupported.matches(&num(1.0), &Context::new()), Err("expression language \"groovy\" is not supported by the tester".into()));
     assert!(lang("-", "groovy").is_any());
     assert!(feel("< \"unterminated").matches(&num(1.0), &Context::new()).is_err());
-    // An earlier item that matches short-circuits a later broken one.
     let t = feel(r#""EU", < "oops"#);
     assert!(check(&t, s("EU")));
     assert!(t.matches(&s("NA"), &Context::new()).is_err());

@@ -8,7 +8,6 @@ fn example(name: &str) -> String {
     format!("{}/examples/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// A fresh directory with copies of the example, so tests can add broken files next to it.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dmn-viewer-report-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -22,7 +21,6 @@ fn text(r: &Report, coverage: bool) -> (String, String) {
     (String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
 
-/// The example with one failing case: rule 4's case expects a different fee.
 fn failing_example(dir: &Path) -> String {
     let dmn = dir.join("fees.dmn");
     std::fs::copy(example("shipping-fees.dmn"), &dmn).unwrap();
@@ -69,7 +67,6 @@ fn fail_on_levels() {
     assert!(FailOn::Error.fails(Severity::Error) && !FailOn::Error.fails(Severity::Warning));
     assert!(FailOn::Warn.fails(Severity::Warning) && !FailOn::Warn.fails(Severity::Info));
     assert!(!FailOn::Never.fails(Severity::Error));
-    // The example has warnings but no errors.
     let r = Report::check(&[example("shipping-fees.dmn")], None);
     assert!(!r.failed(FailOn::Error) && r.failed(FailOn::Warn) && !r.failed(FailOn::Never));
 }
@@ -110,7 +107,6 @@ fn junit_is_well_formed_and_follows_fail_on() {
         let doc = roxmltree::Document::parse(&x).unwrap_or_else(|e| panic!("{e}\n{x}"));
         let root = doc.root_element();
         assert_eq!(root.tag_name().name(), "testsuites");
-        // Lint: one case for the decision; tests: 9 cases; the broken file: one erroring case.
         assert_eq!(root.attribute("tests"), Some("11"));
         assert_eq!(root.attribute("failures"), Some((1 + lint_failures).to_string().as_str()));
         assert_eq!(root.attribute("errors"), Some("1"));
@@ -148,7 +144,6 @@ fn sarif_uses_codes_files_and_lines() {
     let loc = &js["locations"][0]["physicalLocation"];
     assert!(loc["artifactLocation"]["uri"].as_str().unwrap().ends_with("examples/shipping-fees.dmn"));
     assert!(loc["region"]["startLine"].as_u64().unwrap() > 1);
-    // No line: the message names where the issue is instead.
     let info = results.iter().find(|x| x["ruleId"] == "INPUT_ONLY_IN_OUTPUT").unwrap();
     assert_eq!(info["level"], "note");
     assert!(info["locations"][0]["physicalLocation"].get("region").is_none());
@@ -187,7 +182,6 @@ fn globs_and_directories_expand_once() {
         assert!(expand(&format!("{back}\\*.dmn")).unwrap().iter().all(|p| p.starts_with(&back) && !p[back.len()..].contains('/')), "backslash patterns keep backslashes");
     }
 
-    // Overlapping patterns check each file once; a pattern without matches is reported.
     let r = Report::check(&[format!("{d}/a.dmn"), format!("{d}/**/*.dmn"), format!("{d}/*.nope")], None);
     let paths: Vec<_> = r.files.iter().map(|f| f.path[d.len() + 1..].to_string()).collect();
     let mut want = vec!["a.dmn".to_string()];

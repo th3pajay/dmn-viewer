@@ -44,7 +44,6 @@ fn main() -> ExitCode {
     }
     let report = Report::check(&inputs, tests.as_deref());
     let out = &mut io::stdout().lock();
-    // A closed pipe (e.g. `| head`) is not a check failure; the exit code still reports the result.
     let _ = match format.as_deref() {
         Some("--json") => writeln!(out, "{}", report.json(fail_on)),
         Some("--junit") => write!(out, "{}", report.junit(fail_on)),

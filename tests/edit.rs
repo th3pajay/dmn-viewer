@@ -15,7 +15,6 @@ fn table(d: &Definitions) -> &DecisionTable {
     d.table(0).unwrap()
 }
 
-/// Bytes that differ between `a` and `b`, as (start, len in a, len in b), after trimming the common prefix and suffix.
 fn changed(a: &str, b: &str) -> (usize, usize, usize) {
     let p = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
     let s = a[p..].bytes().rev().zip(b[p..].bytes().rev()).take_while(|(x, y)| x == y).count();

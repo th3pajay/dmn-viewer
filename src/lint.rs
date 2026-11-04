@@ -68,7 +68,6 @@ impl Issue {
     }
 }
 
-// A cell's condition as lint compares it: literal sets by value, anything else by its text.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Cond<'a> {
     Any,

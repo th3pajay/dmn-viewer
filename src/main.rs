@@ -283,7 +283,6 @@ fn chip(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) -> egui::Respon
     badge_shape(ui, text.to_string(), BadgeShape { font: FontId::monospace(11.5), pad: 7.0, height: 22.0, radius: 5, max_w }, bg, fg)
 }
 
-/// How many test cases fired a rule: accent when a passing case did, red when only failing ones did.
 fn coverage_badge(ui: &mut egui::Ui, t: &Theme, cov: &Coverage, ri: usize) {
     let (pass, fail) = cov.fired_by.get(ri).copied().unwrap_or_default();
     let (bg, fg, tip) = match (pass, fail) {
@@ -294,7 +293,6 @@ fn coverage_badge(ui: &mut egui::Ui, t: &Theme, cov: &Coverage, ri: usize) {
     badge_shape(ui, (pass + fail).to_string(), BadgeShape { font: FontId::monospace(10.0), pad: 4.0, height: 16.0, radius: 8, max_w: 40.0 }, bg, fg).on_hover_text(tip);
 }
 
-/// "Coverage 7/9 rules covered (77%) · never fired: 3, 8", truncated to the space available.
 fn coverage_line(ui: &mut egui::Ui, t: &Theme, cov: &Coverage) {
     let full = cov.covered() == cov.total();
     let text = format!("Coverage {}  ·  never fired: {}", cov.summary(), cov.never_fired_label());
@@ -462,11 +460,9 @@ fn column_menu(ui: &mut egui::Ui, decision: usize, c: Col, outputs: usize, acts:
     }
 }
 
-/// The inline editor in a table cell. Enter commits, Shift+Enter adds a line, Escape cancels, clicking away commits.
 fn edit_box(ui: &mut egui::Ui, ed: &mut Editing, acts: &mut Vec<Act>) {
     let id = ui.id().with("inline_edit");
     if ui.memory(|m| m.has_focus(id)) {
-        // consume_key ignores extra Shift, so check it here to leave Shift+Enter to the text box.
         if ui.input_mut(|i| !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
             acts.push(Act::EndEdit { at: ed.at, commit: true });
         }
@@ -497,21 +493,15 @@ enum Act {
     SevFilter(Option<Severity>),
     Edit(Edit),
     BeginEdit(Cursor, String),
-    EndEdit {
-        at: Cursor,
-        commit: bool,
-    },
+    EndEdit { at: Cursor, commit: bool },
     EditHeader(Col),
     Save,
     Undo,
     Redo,
     Review,
-    /// Starts a fix session: for every fixable issue, or for the one with this key.
     FixStart(Option<String>),
     FixChoose(usize),
-    FixMove {
-        down: bool,
-    },
+    FixMove { down: bool },
     FixApply,
     FixSkip,
     FixStop,
@@ -523,15 +513,11 @@ enum Act {
     Cmd(menu::Cmd),
 }
 
-/// The review-changes panel. Hunks are computed once when it opens; nothing can edit the
-/// document while it is up, so their ranges stay valid.
 struct Review {
     hunks: Vec<Hunk>,
-    /// Per hunk: lines in its old and its new text.
     lines: Vec<(usize, usize)>,
 }
 
-/// Hunks and lines per side shown in the review panel; the rest is summarised.
 const REVIEW_HUNKS: usize = 300;
 const REVIEW_LINES: usize = 40;
 
@@ -539,6 +525,7 @@ struct App {
     loaded: Option<Workspace>,
     error: Option<String>,
     filter: String,
+    visible_cache: Option<(String, usize, u64, Arc<Vec<usize>>)>,
     sev_filter: Option<Severity>,
     show_langs: bool,
     theme: Theme,
@@ -639,6 +626,7 @@ impl App {
             loaded: None,
             error: None,
             filter: String::new(),
+            visible_cache: None,
             sev_filter: None,
             show_langs: false,
             theme,
@@ -1158,6 +1146,27 @@ impl App {
                         if hp != current || agg != before {
                             acts.push(Act::Edit(Edit::HitPolicy { decision, hit_policy: hp, aggregation: agg }));
                         }
+                        let file_lang = l.defs().expression_language.clone();
+                        let shown = CELL_LANGS
+                            .iter()
+                            .find(|(_, v)| v.map(str::to_string) == file_lang.as_ref().map(|s| s.to_ascii_lowercase()))
+                            .map_or_else(|| file_lang.clone().unwrap_or_default(), |(n, _)| n.to_string());
+                        let shown = if file_lang.is_none() { "FEEL (default)".to_string() } else { shown };
+                        let mut picked = file_lang.clone();
+                        egui::ComboBox::from_id_salt("file_language")
+                            .selected_text(shown)
+                            .width(130.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut picked, None, "FEEL (default)");
+                                for (name, v) in CELL_LANGS.iter().skip(1) {
+                                    ui.selectable_value(&mut picked, v.map(str::to_string), *name);
+                                }
+                            })
+                            .response
+                            .on_hover_text("Expression language for the whole file. Cells and inputs can override it.");
+                        if picked != file_lang {
+                            acts.push(Act::Edit(Edit::FileLanguage { lang: picked }));
+                        }
                     } else {
                         pill(ui, &tb.hit_policy, t.chip, t.muted).on_hover_text("Hit policy");
                     }
@@ -1227,20 +1236,21 @@ impl App {
 
     fn rules_body(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>, editing: &mut Option<Editing>, scroll: &mut Option<usize>) {
         let t = self.theme;
-        let (fired, coverage) = {
+        let (outcome, coverage) = {
             let Some(l) = self.loaded.as_mut() else { return };
             let decision = l.decision();
             let mut tests = l.tests();
             let defs = tests.defs;
             match defs.table(decision) {
                 Some(tb) => {
-                    let fired = if tests.is_active() && tests.fields().len() == tb.inputs.len() { tests.outcome().map(|o| o.fired.clone()).unwrap_or_default() } else { Vec::new() };
+                    let outcome = if tests.is_active() && tests.fields().len() == tb.inputs.len() { tests.outcome() } else { None };
                     let coverage = tests.coverage();
-                    (fired, coverage)
+                    (outcome, coverage)
                 }
-                None => (Vec::new(), None),
+                None => (None, None),
             }
         };
+        let fired: &[usize] = outcome.as_ref().map_or(&[], |o| &o.fired);
         let Some(l) = &self.loaded else { return };
         let decision = l.decision();
         let Some(dec) = l.defs().decisions.get(decision) else { return };
@@ -1262,7 +1272,6 @@ impl App {
         let nrules = tb.rules.len();
         let row_height = self.row_height();
         let issues: Vec<&Issue> = l.issues().iter().filter(|i| i.decision == Some(decision)).collect();
-        // During a fix session the fix panel takes the drawer's place.
         if !self.is_fixing() {
             egui::Panel::right("drawer")
                 .resizable(true)
@@ -1271,20 +1280,51 @@ impl App {
                 .show(ui, |ui| self.issue_list(ui, &issues, nrules, false, acts));
         }
 
-        let rule_sev = |ri: usize| issues.iter().filter(|i| row_specific(i, nrules) && i.rules.contains(&ri)).map(|i| i.severity).min();
-        let cell_sev = |ri: usize, c: Col| issues.iter().filter(|i| i.column == Some(c) && i.rules.contains(&ri) && row_specific(i, nrules)).map(|i| i.severity).min();
+        let (n_in, n_out) = (tb.inputs.len(), tb.outputs.len());
+        let mut rule_sevs: Vec<Option<Severity>> = vec![None; nrules];
+        let mut cell_sevs: Vec<Option<Severity>> = vec![None; nrules * (n_in + n_out)];
+        for i in issues.iter().filter(|i| row_specific(i, nrules)) {
+            let slot = i.column.and_then(|c| match c {
+                Col::Input(k) if k < n_in => Some(k),
+                Col::Output(k) if k < n_out => Some(n_in + k),
+                _ => None,
+            });
+            for &ri in i.rules.iter().filter(|&&ri| ri < nrules) {
+                rule_sevs[ri] = Some(rule_sevs[ri].map_or(i.severity, |old| old.min(i.severity)));
+                if let Some(s) = slot {
+                    let c = &mut cell_sevs[ri * (n_in + n_out) + s];
+                    *c = Some(c.map_or(i.severity, |old| old.min(i.severity)));
+                }
+            }
+        }
+        let rule_sev = |ri: usize| rule_sevs[ri];
+        let cell_sev = |ri: usize, c: Col| match c {
+            Col::Input(k) if k < n_in => cell_sevs[ri * (n_in + n_out) + k],
+            Col::Output(k) if k < n_out => cell_sevs[ri * (n_in + n_out) + n_in + k],
+            _ => None,
+        };
         let col_issue = |c: Col| issues.iter().filter(|i| i.column == Some(c) && i.rules.is_empty() && i.severity != Severity::Info).min_by_key(|i| i.severity).copied();
 
-        let f = self.filter.to_lowercase();
-        let visible: Vec<usize> = (0..nrules)
-            .filter(|&ri| {
-                let r = &tb.rules[ri];
-                f.is_empty()
-                    || (ri + 1).to_string() == f
-                    || r.summary().to_lowercase().contains(&f)
-                    || r.inputs.iter().map(|e| &e.text).chain(r.outputs.iter().map(|e| &e.text)).any(|text| text.to_lowercase().contains(&f))
-            })
-            .collect();
+        let revision = l.revision();
+        let visible = match &self.visible_cache {
+            Some((f, d, rev, v)) if *d == decision && *rev == revision && *f == self.filter => v.clone(),
+            _ => {
+                let f = self.filter.to_lowercase();
+                let v: Arc<Vec<usize>> = Arc::new(
+                    (0..nrules)
+                        .filter(|&ri| {
+                            let r = &tb.rules[ri];
+                            f.is_empty()
+                                || (ri + 1).to_string() == f
+                                || r.summary().to_lowercase().contains(&f)
+                                || r.inputs.iter().map(|e| &e.text).chain(r.outputs.iter().map(|e| &e.text)).any(|text| text.to_lowercase().contains(&f))
+                        })
+                        .collect(),
+                );
+                self.visible_cache = Some((self.filter.clone(), decision, revision, v.clone()));
+                v
+            }
+        };
         let scroll_target = scroll.take().and_then(|r| visible.iter().position(|&x| x == r));
         let selected = l.selected();
         let show_langs = self.show_langs;
@@ -1440,6 +1480,7 @@ impl App {
                         builder = builder.scroll_to_row(row, Some(Align::Center));
                     }
                     let paint_cell = |ui: &mut egui::Ui, header: bool| {
+                        ui.style_mut().interaction.selectable_labels = false;
                         let r = ui.max_rect();
                         ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, if header { t.line } else { t.line_soft }));
                         ui.add_space(12.0);
@@ -1556,7 +1597,9 @@ impl App {
                                     }
                                     ui.add_space(6.0);
                                     let num = if is_fired { bold((ri + 1).to_string(), 12.5).color(t.accent) } else { RichText::new((ri + 1).to_string()).size(12.5).color(t.faint) };
-                                    ui.label(num).on_hover_text(format!("{}  ·  XML line {}{}", r.id, r.line, if is_fired { "\nfired for the current test inputs" } else { "" }));
+                                    ui.label(num).on_hover_ui(|ui| {
+                                        ui.label(format!("{}  ·  XML line {}{}", r.id, r.line, if is_fired { "\nfired for the current test inputs" } else { "" }));
+                                    });
                                     if let Some(cov) = &coverage {
                                         ui.add_space(4.0);
                                         coverage_badge(ui, &t, cov, ri);
@@ -1609,13 +1652,15 @@ impl App {
                                         });
                                     }
                                     if let Some((text, lang)) = e {
-                                        let text: String = text.trim().lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
-                                        resp.on_hover_text(format!(
-                                            "{text}\n\nLanguage: {}\nColumn type: {}{}",
-                                            lang_describe(lang),
-                                            ty.unwrap_or("-"),
-                                            if is_input { "\nKind: condition (unary test)" } else { "\nKind: output expression" }
-                                        ));
+                                        resp.on_hover_ui(|ui| {
+                                            let text: String = text.trim().lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
+                                            ui.label(format!(
+                                                "{text}\n\nLanguage: {}\nColumn type: {}{}",
+                                                lang_describe(lang),
+                                                ty.unwrap_or("-"),
+                                                if is_input { "\nKind: condition (unary test)" } else { "\nKind: output expression" }
+                                            ));
+                                        });
                                     }
                                 };
                                 for ci in 0..tb.inputs.len() {
@@ -1905,7 +1950,6 @@ fn hint_row<const N: usize>(ui: &mut egui::Ui, t: &Theme, hints: [(&[&str], &str
     picked
 }
 
-/// One from → to line: where, the old text struck through, the new text.
 fn change_row(ui: &mut egui::Ui, t: &Theme, c: &fix::Change) {
     ui.label(RichText::new(&c.place).size(11.5).color(t.faint));
     let removed_bg = if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) };
@@ -1931,7 +1975,6 @@ fn note(ui: &mut egui::Ui, bg: Color32, fg: Color32, text: impl Into<String>) {
     });
 }
 
-/// The fix session's panel: the current step (options, from → to, test effect, XML lines) or the summary.
 fn fix_panel(ui: &mut egui::Ui, t: &Theme, v: &FixView, acts: &mut Vec<Act>) {
     let warn_bg = t.warn.gamma_multiply(if t.dark { 0.25 } else { 0.15 });
     let error_bg = if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) };
@@ -2490,7 +2533,6 @@ impl eframe::App for App {
             }
             self.pending = Some(Pending::Close);
         }
-        // Fix session keys, when no text box has focus: Enter apply, S skip, Esc stop, arrows choose.
         if self.is_fixing() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
             let step = self.loaded.as_ref().is_some_and(|l| l.fix_offering());
             let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
@@ -2510,8 +2552,6 @@ impl eframe::App for App {
                 acts.push(Act::FixClose);
             }
         }
-        // While the review panel is up the document must not change, so other shortcuts wait;
-        // a fix session changes it only through its own steps.
         let reviewing = self.review.is_some() || self.is_fixing();
         if let Some(p) = dropped.into_iter().next().filter(|_| !reviewing) {
             self.guard(&ctx, Pending::Load(p));

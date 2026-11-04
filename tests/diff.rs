@@ -1,6 +1,5 @@
 use dmn_viewer::diff::{Hunk, Spans, changed, hunks, line_count, line_diff};
 
-/// An editor in miniature: applies replacements to the text and records them in `Spans`.
 struct Doc {
     saved: String,
     text: String,
@@ -28,7 +27,6 @@ impl Doc {
         hunks(&self.saved, &self.text, &self.spans)
     }
 
-    /// (old line, new line, old text, new text) per hunk.
     fn shown(&self) -> Vec<(usize, usize, &str, &str)> {
         self.hunks().into_iter().map(|h| (h.old_line, h.new_line, &self.saved[h.old], &self.text[h.new])).collect()
     }
@@ -93,7 +91,6 @@ fn stale_spans_fall_back_to_a_full_comparison() {
 
 #[test]
 fn a_structural_edit_splits_into_the_lines_it_changed() {
-    // One edit spanning every rule that adds a line to each, like inserting an input column.
     let rule =
         |i: usize, extra: bool| format!("  <rule id=\"R{i}\">\n    <inputEntry><text>a</text></inputEntry>\n{}  </rule>\n", if extra { "    <inputEntry><text></text></inputEntry>\n" } else { "" });
     let saved: String = (0..500).map(|i| rule(i, false)).collect();
@@ -112,7 +109,6 @@ fn a_structural_edit_splits_into_the_lines_it_changed() {
 fn repeated_lines_without_anchors_still_diff_exactly() {
     let mut d = Doc::new("x\nx\nx\nx\n");
     d.edit(0, 8, "x\ny\nx\nx\nz\n");
-    // Three of the four x lines are kept: one becomes y, and z is added at the end.
     assert_eq!(d.shown(), vec![(2, 2, "x\n", "y\n"), (5, 5, "", "z\n")]);
 }
 
@@ -123,7 +119,6 @@ fn line_diff_runs() {
     assert_eq!(line_diff(&a, &b), vec![(1..2, 1..2), (4..4, 4..5)]);
     assert_eq!(line_diff(&a, &a), vec![]);
     assert_eq!(line_diff(&a, &[]), vec![(0..5, 0..0)]);
-    // A moved line: kept where the longer run of anchors agrees, reported as removed and added.
     assert_eq!(line_diff(&["1", "2", "3"], &["2", "3", "1"]), vec![(0..1, 0..0), (3..3, 2..3)]);
 }
 
@@ -149,7 +144,6 @@ fn random_edits_replay_exactly() {
             while !d.text.is_char_boundary(at) {
                 at -= 1;
             }
-            // Now and then a long edit across many lines, so hunks get split line by line.
             let len = if rnd(4) == 0 { rnd(900) } else { rnd(40) };
             let mut end = (at + len).min(d.text.len());
             while !d.text.is_char_boundary(end) {

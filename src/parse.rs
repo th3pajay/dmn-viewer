@@ -104,7 +104,6 @@ pub fn parse(xml: &str) -> Result<Definitions, String> {
     Ok(defs)
 }
 
-// Rules arrive in document order, so counting forward stays linear; text_pos_at rescans from byte 0 each call.
 struct LineCursor<'a> {
     text: &'a str,
     pos: usize,

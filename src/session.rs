@@ -97,14 +97,16 @@ impl TestSession {
     }
 
     pub fn expected(&mut self, defs: &Definitions, decision: usize) -> Arc<Option<Expected>> {
-        let key = (decision, self.expect.clone(), self.fields.clone(), self.suite_gen);
-        if let Some((k, e)) = &self.expected
-            && *k == key
+        if let Some(((d, expect, fields, gen_), e)) = &self.expected
+            && *d == decision
+            && *expect == self.expect
+            && *fields == self.fields
+            && *gen_ == self.suite_gen
         {
             return e.clone();
         }
         let e = Arc::new(self.build_expected(defs, decision));
-        self.expected = Some((key, e.clone()));
+        self.expected = Some(((decision, self.expect.clone(), self.fields.clone(), self.suite_gen), e.clone()));
         e
     }
 
@@ -251,6 +253,7 @@ impl TestSession {
         };
         self.target = Some(rule);
         self.expect = Expect::Rule(rule);
+        let previous = std::mem::take(&mut self.fields);
         self.fields = values
             .into_iter()
             .enumerate()
@@ -259,7 +262,8 @@ impl TestSession {
                 Some(Value::Num(n)) => eval::fmt_num(n),
                 Some(Value::Bool(b)) => b.to_string(),
                 Some(Value::Null) | None if free(i) => from_suite(i).unwrap_or_default(),
-                Some(Value::Null) | None => String::new(),
+                None => previous.get(i).cloned().unwrap_or_default(),
+                Some(Value::Null) => String::new(),
             })
             .collect();
         true

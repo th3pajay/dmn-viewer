@@ -1,4 +1,3 @@
-// Embeds the icon and version information (shown in Explorer under Properties > Details) in the Windows executables.
 fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {

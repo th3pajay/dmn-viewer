@@ -3,13 +3,11 @@ use crate::model::ExpressionLanguage;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// An input entry's condition, parsed once when the file loads.
 #[derive(Clone, Debug, Default)]
 pub struct UnaryTests {
     kind: Kind,
 }
 
-/// The cell as a plain list of literals, e.g. `"EU","NA"` or `not(1, 2)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Literals {
     pub negated: bool,
@@ -57,7 +55,7 @@ impl Operand {
     fn eval(&self, vars: &Context, local: Option<(&str, &Value)>) -> Result<Value, String> {
         match self {
             Operand::Value(v) => Ok(v.clone()),
-            Operand::Program(Ok(p)) => p.exec(vars, local.map(|(k, v)| BTreeMap::from([(k.to_string(), v.clone())])).unwrap_or_default()),
+            Operand::Program(Ok(p)) => p.exec(vars, BTreeMap::new(), local),
             Operand::Program(Err(e)) => Err(e.clone()),
         }
     }
@@ -78,7 +76,6 @@ impl UnaryTests {
         UnaryTests { kind }
     }
 
-    /// Errors are the parse or evaluation errors of the first item that fails, as the cell is evaluated.
     pub fn matches(&self, input: &Value, vars: &Context) -> Result<bool, String> {
         match &self.kind {
             Kind::Any => Ok(true),
@@ -99,7 +96,6 @@ impl UnaryTests {
         matches!(self.kind, Kind::Any)
     }
 
-    /// Only FEEL cells that are nothing but literals, so lint can compare cells as sets.
     pub fn literals(&self) -> Option<&Literals> {
         match &self.kind {
             Kind::Feel { literals, .. } => literals.as_ref(),
@@ -129,7 +125,6 @@ impl UnaryTests {
         Some(ordered)
     }
 
-    /// A value to type into the tester so the cell matches: the first listed literal, or empty (null) for `not(...)`.
     pub fn sample(&self) -> Option<String> {
         let l = self.literals()?;
         Some(if l.negated { String::new() } else { l.items.first().map(|v| v.trim_matches('"').to_string()).unwrap_or_default() })
@@ -284,7 +279,6 @@ pub(crate) fn is_literal(s: &str) -> bool {
     is_quoted(s) || s.parse::<f64>().is_ok() || s == "true" || s == "false"
 }
 
-/// The items of a comma-separated list, in written order, if every one is a literal.
 pub(crate) fn literal_items(s: &str) -> Option<Vec<String>> {
     let items = split_top(s);
     (!items.is_empty() && items.iter().all(|i| is_literal(i))).then_some(items)

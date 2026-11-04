@@ -1,6 +1,3 @@
-//! Automatic fixes for lint issues. A fixable issue offers one or more fixes; each fix is a list
-//! of edits that the user confirms before it is applied. Nothing here reads or writes files.
-
 use crate::edit::{self, Column, Edit};
 use crate::gaps;
 use crate::lint::{self, Issue};
@@ -12,18 +9,14 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fix {
     pub label: String,
-    /// What else the user should know before confirming, e.g. how results change.
     pub hint: Option<String>,
-    /// Deletes a rule or a column. Never pre-selected; the label names what goes.
     pub destructive: bool,
     pub edits: Vec<Edit>,
 }
 
-/// A fixable issue with the ways it can be fixed.
 #[derive(Clone, Debug)]
 pub struct Candidate {
     pub issue: Issue,
-    /// Identifies the issue across edits that renumber rules, so a skip sticks to it.
     pub key: String,
     pub fixes: Vec<Fix>,
 }
@@ -33,13 +26,11 @@ impl Candidate {
         self.fixes.iter().all(|f| f.destructive)
     }
 
-    /// The fix selected when the step opens: the first one that deletes nothing.
     pub fn default_fix(&self) -> Option<usize> {
         self.fixes.iter().position(|f| !f.destructive)
     }
 }
 
-/// One line of the from → to overview.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     pub place: String,
@@ -47,17 +38,13 @@ pub struct Change {
     pub to: String,
 }
 
-/// How a fix changes the loaded test suite's results.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TestEffect {
     pub total: usize,
     pub passed_before: usize,
     pub passed_after: usize,
-    /// Passing cases that would fail.
     pub broken: Vec<String>,
-    /// Failing cases that would pass.
     pub fixed: Vec<String>,
-    /// Cases that fail before and after, but for a different reason.
     pub changed: Vec<String>,
 }
 
@@ -145,7 +132,6 @@ fn clause_key(id: &str, i: usize) -> String {
     if id.is_empty() { format!("#{i}") } else { id.to_string() }
 }
 
-/// The ways an issue can be fixed; empty when it needs a person (a placeholder, a missing default rule, …).
 pub fn fixes(defs: &Definitions, is: &Issue) -> Vec<Fix> {
     if is.code == "DUPLICATE_ID" {
         return duplicate_id(is).into_iter().collect();
@@ -200,7 +186,6 @@ fn gap_rule(d: usize, t: &DecisionTable) -> Option<Fix> {
 }
 
 fn duplicate_id(is: &Issue) -> Option<Fix> {
-    // The message is `Element id "<id>" is used more than once; …`.
     let id = is.message.split('"').nth(1).filter(|id| !id.is_empty())?;
     Some(Fix {
         label: format!("Keep the first \"{id}\" and give the later elements new ids ({id}_2, …)"),
@@ -240,12 +225,10 @@ fn javascript_input(d: usize, i: usize, inp: &InputClause) -> Fix {
     }
 }
 
-/// An input header edit that changes only the language and the allowed values.
 fn input_header(d: usize, i: usize, inp: &InputClause, lang: Option<String>, allowed: Option<String>) -> Edit {
     Edit::InputHeader { decision: d, input: i, label: inp.label.clone(), expression: inp.expression.clone(), type_ref: inp.type_ref.clone(), lang, allowed }
 }
 
-/// The separator the cell already uses between list items.
 fn separator(text: &str) -> &'static str {
     if text.contains(", ") { ", " } else { "," }
 }
@@ -276,7 +259,6 @@ fn rules_phrase(rules: &[usize]) -> String {
     if rules.len() == 1 { format!("rule {label}") } else { format!("rules {label}") }
 }
 
-/// Values in `items` missing from `allowed`, in written order, without repeats.
 fn missing(items: &[String], allowed: &[String], out: &mut Vec<String>) {
     for v in items {
         if !allowed.contains(v) && !out.contains(v) {
@@ -311,7 +293,6 @@ fn not_allowed_input(d: usize, t: &DecisionTable, i: usize, rules: &[usize]) -> 
         destructive: false,
         edits: vec![input_header(d, i, inp, inp.lang.declared.clone().filter(|_| inp.lang.is_explicit()), Some(extended(allowed_text, &values)))],
     }];
-    // Removing the values from the rules instead: only where each rule keeps at least one value.
     let mut edits = Vec::new();
     for &r in rules {
         let e = &t.rules[r].inputs[i];
@@ -342,11 +323,9 @@ fn not_allowed_output(d: usize, t: &DecisionTable, o: usize, rules: &[usize]) ->
     })
 }
 
-/// Rule `j` can never fire because the earlier rule `i` matches everything it matches.
 fn unreachable(d: usize, t: &DecisionTable, j: usize, i: usize) -> Vec<Fix> {
     let same = t.rules[i].inputs.iter().zip(&t.rules[j].inputs).all(|(a, b)| a.text.trim() == b.text.trim());
     let mut out = Vec::new();
-    // With identical conditions, moving only makes the other rule unreachable.
     if !same {
         out.push(Fix {
             label: format!("Move rule {} above rule {}", j + 1, i + 1),
@@ -359,7 +338,6 @@ fn unreachable(d: usize, t: &DecisionTable, j: usize, i: usize) -> Vec<Fix> {
     out
 }
 
-/// Applies the edits in order; on error nothing is returned.
 pub fn apply_unchecked(xml: &str, edits: &[Edit]) -> Result<String, String> {
     let mut out = xml.to_string();
     for e in edits {
@@ -376,7 +354,6 @@ pub fn apply(xml: &str, edits: &[Edit]) -> Result<String, String> {
     Ok(out)
 }
 
-/// The from → to lines for one edit, read against the definitions before it is applied.
 pub fn describe(defs: &Definitions, e: &Edit) -> Vec<Change> {
     let ch = |place: String, from: &str, to: &str| Change { place, from: from.to_string(), to: to.to_string() };
     let table = |d: usize| defs.table(d);
@@ -450,8 +427,6 @@ fn language_name(l: &ExpressionLanguage) -> String {
     if l.is_explicit() { name.to_string() } else { format!("{name} (default)") }
 }
 
-/// How the suite's results for `decision` change between two versions of the definitions.
-/// `None` when the suite is empty or is not for this decision.
 pub fn test_effect(before: &Definitions, after: &Definitions, decision: usize, s: &Suite) -> Option<TestEffect> {
     if s.cases.is_empty() || !suite::targets(&s.decision, before.decisions.get(decision)?) {
         return None;

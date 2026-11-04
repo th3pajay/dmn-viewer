@@ -65,8 +65,6 @@ pub struct DecisionTable {
 }
 
 impl DecisionTable {
-    /// The rule note the editor changes: the first annotation column when the table has
-    /// annotation columns (DMN 1.3), otherwise the rule's description.
     pub fn note<'a>(&self, rule: &'a Rule) -> &'a str {
         if self.annotations.is_empty() { &rule.description } else { rule.annotations.first().map_or("", |s| s.as_str()) }
     }
@@ -132,7 +130,6 @@ impl InputEntry {
 }
 
 impl Rule {
-    /// Description and annotation texts joined for display.
     pub fn summary(&self) -> String {
         std::iter::once(&self.description).chain(&self.annotations).filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" | ")
     }

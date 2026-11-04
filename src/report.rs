@@ -1,7 +1,3 @@
-//! One model of a check run (files, lint issues, test results and coverage), rendered as the
-//! human-readable text report, JSON, JUnit XML or SARIF 2.1.0. `dmn-check` only parses its
-//! arguments, builds a `Report` and picks a renderer.
-
 use crate::lint::{self, Column, Issue, Severity};
 use crate::model::{Decision, Definitions};
 use crate::suite::{self, CaseResult, Coverage, Suite};
@@ -13,7 +9,6 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Which lint issues fail the run. Failing tests and unreadable files always do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FailOn {
     #[default]
@@ -46,9 +41,7 @@ pub struct Report {
 }
 
 pub struct FileReport {
-    /// As given on the command line, or as a pattern expanded it.
     pub path: String,
-    /// `Err` when the file could not be read or parsed, or a pattern matched nothing.
     pub result: Result<Checked, String>,
 }
 
@@ -60,7 +53,6 @@ pub struct Checked {
 
 pub struct SuiteReport {
     pub path: String,
-    /// `Err` holds the complete message: the suite file is unreadable or names no decision table.
     pub result: Result<SuiteCheck, String>,
 }
 
@@ -82,8 +74,6 @@ fn decision_name(d: &Decision) -> &str {
 }
 
 impl Report {
-    /// Checks every input: plain paths as given, directories and glob patterns expanded once.
-    /// `tests` replaces the `<name>.tests.json` found next to each file.
     pub fn check(inputs: &[String], tests: Option<&Path>) -> Report {
         let mut seen = HashSet::new();
         let mut files = Vec::with_capacity(inputs.len());
@@ -113,7 +103,6 @@ impl Report {
         })
     }
 
-    /// The human-readable report: problems reading files or suites go to `err`, the rest to `out`.
     pub fn write_text(&self, coverage: bool, out: &mut dyn Write, err: &mut dyn Write) -> io::Result<()> {
         for f in &self.files {
             let c = match &f.result {
@@ -179,8 +168,6 @@ impl Report {
         serde_json::to_string_pretty(&report).expect("the report serialises")
     }
 
-    /// JUnit XML: per file, one test case per decision for its lint issues (failing when an issue
-    /// meets `fail_on`); per suite, one test case per case. Coverage goes into suite properties.
     pub fn junit(&self, fail_on: FailOn) -> String {
         let estimate: usize = self
             .files
@@ -204,7 +191,6 @@ impl Report {
                     continue;
                 }
             };
-            // One case per decision, plus one for file-level issues when there are any.
             let groups = (0..c.defs.decisions.len()).map(Some).chain(c.issues.iter().any(|i| i.decision.is_none()).then_some(None));
             let (mut n, mut failed) = (0, 0);
             for d in groups {
@@ -263,9 +249,6 @@ impl Report {
         format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"dmn-check\" tests=\"{tests}\" failures=\"{failures}\" errors=\"{errors}\">\n{body}</testsuites>\n")
     }
 
-    /// SARIF 2.1.0 with one result per lint issue (the lint code is the rule id) and one per
-    /// unreadable file. Issues tied to rules point at the first rule's line; the others name
-    /// their decision, rules and column in the message instead. Test results are not included.
     pub fn sarif(&self) -> String {
         const FILE_ERROR: &str = "FILE_ERROR";
         let mut rules: Vec<SRule> = Vec::new();
@@ -334,7 +317,6 @@ fn run_suite(defs: &Definitions, path: &Path) -> SuiteReport {
     SuiteReport { path: shown, result }
 }
 
-/// "1,4,5": 1-based rule numbers as the text report lists fired rules.
 fn fired_list(rules: &[usize]) -> String {
     let mut s = String::with_capacity(rules.len() * 3);
     for (k, r) in rules.iter().enumerate() {
@@ -343,7 +325,6 @@ fn fired_list(rules: &[usize]) -> String {
     s
 }
 
-/// Escapes text for XML content and attribute values, dropping characters XML 1.0 cannot hold.
 fn xml(s: &str) -> Cow<'_, str> {
     if !s.contains(|c: char| matches!(c, '&' | '<' | '>' | '"' | '\'') || (c < ' ' && !matches!(c, '\t' | '\n' | '\r'))) {
         return Cow::Borrowed(s);
@@ -363,7 +344,6 @@ fn xml(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// A relative path as a relative URI reference; an absolute one as a `file://` URI.
 fn uri(path: &str) -> String {
     let p = path.replace('\\', "/");
     let p = p.strip_prefix("./").unwrap_or(&p);
@@ -384,7 +364,6 @@ fn uri(path: &str) -> String {
     s
 }
 
-/// Where an issue is, in terms a reader can find without a line number.
 struct Located<'a> {
     decision: Option<&'a str>,
     rules: Vec<usize>,
@@ -408,7 +387,6 @@ impl<'a> Located<'a> {
         Located { decision: dec.map(decision_name), rules, column, line }
     }
 
-    /// "decision Shipping Fee, rules 3-4, input column Weight", or `None` when there is nothing to say.
     fn describe(&self) -> Option<String> {
         let mut parts = Vec::with_capacity(3);
         if let Some(d) = self.decision {
@@ -423,8 +401,6 @@ impl<'a> Located<'a> {
         (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
-
-// JSON: borrowed views of the report, serialised without copying the messages.
 
 #[derive(Serialize)]
 struct JReport<'a> {
@@ -463,7 +439,6 @@ struct JIssue<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<&'a str>,
-    /// 1-based.
     rules: Vec<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     column: Option<JColumn<'a>>,
@@ -486,7 +461,6 @@ impl<'a> JIssue<'a> {
 #[derive(Serialize)]
 struct JColumn<'a> {
     kind: &'static str,
-    /// 1-based among the table's inputs or outputs.
     index: usize,
     name: &'a str,
 }
@@ -546,8 +520,6 @@ struct JCoverage {
     never_fired: Vec<usize>,
     only_failing: Vec<usize>,
 }
-
-// SARIF 2.1.0: the subset the GitHub and Azure DevOps viewers read.
 
 #[derive(Serialize)]
 struct Sarif<'a> {

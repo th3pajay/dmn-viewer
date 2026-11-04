@@ -59,12 +59,11 @@ pub fn value_to_json(v: &Value) -> J {
     }
 }
 
-/// Input binding: a table input's value is stored under its input expression.
 pub fn binding_key(inp: &InputClause) -> &str {
-    inp.expression.trim()
+    let e = inp.expression.trim();
+    if inp.lang.language == Language::Juel { crate::eval::juel_body(e) } else { e }
 }
 
-/// Input binding: look a table input's value up by its input expression, falling back to its label.
 pub fn bound<'a, V>(inp: &InputClause, values: &'a BTreeMap<String, V>) -> Option<&'a V> {
     values.get(binding_key(inp)).or_else(|| values.get(&inp.label))
 }
@@ -149,11 +148,8 @@ pub fn run_case(t: &DecisionTable, case: &Case) -> CaseResult {
     CaseResult { pass: problems.is_empty(), problems, outcome }
 }
 
-/// Which rules a suite's cases fired. A rule is covered when any case fired it; a rule fired only
-/// by failing cases is still covered, but counted separately since those runs are suspect.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Coverage {
-    /// Per rule: how many passing and how many failing cases fired it.
     pub fired_by: Vec<(u32, u32)>,
 }
 
@@ -182,17 +178,14 @@ impl Coverage {
         self.fired_by.iter().filter(|&&(p, f)| p + f > 0).count()
     }
 
-    /// Rules no case fired, 0-based.
     pub fn never_fired(&self) -> Vec<usize> {
         self.fired_by.iter().enumerate().filter(|(_, c)| c.0 + c.1 == 0).map(|(i, _)| i).collect()
     }
 
-    /// Covered rules that only failing cases fired, 0-based.
     pub fn only_failing(&self) -> Vec<usize> {
         self.fired_by.iter().enumerate().filter(|(_, c)| c.0 == 0 && c.1 > 0).map(|(i, _)| i).collect()
     }
 
-    /// "7/9 rules covered (77%), 1 only by failing cases". The percentage rounds down, so 100% means all.
     pub fn summary(&self) -> String {
         let (covered, total) = (self.covered(), self.total());
         let pct = (covered * 100).checked_div(total).unwrap_or(100);
@@ -201,14 +194,12 @@ impl Coverage {
         format!("{covered}/{total} rules covered ({pct}%){tail}")
     }
 
-    /// The never-fired rules, 1-based with ranges ("3, 5-7"), or "none".
     pub fn never_fired_label(&self) -> String {
         let never = self.never_fired();
         if never.is_empty() { "none".into() } else { crate::lint::rules_label(&never) }
     }
 }
 
-/// Whether a suite naming `decision` (by id or name; empty matches any) is about `d`.
 pub fn targets(decision: &str, d: &Decision) -> bool {
     decision.is_empty() || d.id == decision || d.name == decision
 }
