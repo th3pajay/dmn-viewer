@@ -1,6 +1,6 @@
 [package]
 name = "dmn-viewer"
-version = "1.8.15"
+version = "1.8.16"
 edition = "2024"
 rust-version = "1.92"
 authors = ["th3pajay"]
