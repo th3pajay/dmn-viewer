@@ -84,19 +84,32 @@ fn shown(v: Option<&Value>) -> String {
 }
 
 pub fn check(t: &DecisionTable, o: &Outcome, e: &Expectation) -> Verdict {
+    judge(t, o, e, true)
+}
+
+pub fn problems(t: &DecisionTable, o: &Outcome, e: &Expectation) -> Vec<String> {
+    judge(t, o, e, false).problems
+}
+
+static NULL: Value = Value::Null;
+
+fn judge(t: &DecisionTable, o: &Outcome, e: &Expectation, cells: bool) -> Verdict {
     let mut v = Verdict { expect_error: e.expect_error, ..Verdict::default() };
     let no = t.outputs.len();
     let rows_policy = t.hit_policy.returns_rows() && e.rule.is_none() && o.aggregate.is_none();
     let rule_row = e.rule.map(|r| o.fired.iter().position(|&f| f == r).unwrap_or(0));
     let actual_rows = if rows_policy { o.rows.len() } else { 1 };
-    let actual = |row: usize, oi: usize| -> Option<Value> {
-        if let Some(pos) = rule_row {
-            return (row == 0).then(|| o.rows.get(pos).and_then(|r| r.get(oi)).cloned().unwrap_or(Value::Null));
-        }
+    let actual = |row: usize, oi: usize| -> Option<&Value> {
         if rows_policy {
-            return o.rows.get(row).and_then(|r| r.get(oi)).cloned();
+            return o.rows.get(row).and_then(|r| r.get(oi));
         }
-        (row == 0).then(|| o.output(oi))
+        if row > 0 {
+            return None;
+        }
+        if let Some(pos) = rule_row {
+            return Some(o.rows.get(pos).and_then(|r| r.get(oi)).unwrap_or(&NULL));
+        }
+        Some(o.aggregate.as_ref().or_else(|| o.rows.first().and_then(|r| r.get(oi))).unwrap_or(&NULL))
     };
 
     let mut expected: Vec<Option<Vec<Value>>> = vec![None; no];
@@ -135,9 +148,9 @@ pub fn check(t: &DecisionTable, o: &Outcome, e: &Expectation) -> Verdict {
             } else {
                 for (row, w) in want.iter().enumerate() {
                     let got = actual(row, idx);
-                    if got.as_ref() != Some(w) {
+                    if got != Some(w) {
                         let at = if rows_policy { format!("{name} #{}", row + 1) } else { name.clone() };
-                        v.problems.push(format!("{at}: expected {}, got {}", w.display(), shown(got.as_ref())));
+                        v.problems.push(format!("{at}: expected {}, got {}", w.display(), shown(got)));
                     }
                 }
             }
@@ -147,10 +160,10 @@ pub fn check(t: &DecisionTable, o: &Outcome, e: &Expectation) -> Verdict {
 
     let rows = expected.iter().flatten().map(Vec::len).max().unwrap_or(0).max(actual_rows).max(1);
     v.rows = rows;
-    v.cells.reserve_exact(rows * no);
-    for row in 0..rows {
+    v.cells.reserve_exact(if cells { rows * no } else { 0 });
+    for row in (0..rows).filter(|_| cells) {
         for (oi, out) in t.outputs.iter().enumerate() {
-            let actual = actual(row, oi);
+            let actual = actual(row, oi).cloned();
             let type_mismatch = out.type_ref.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("string")) && actual.as_ref().is_some_and(|a| !matches!(a, Value::Str(_) | Value::Null));
             let checked = expected[oi].is_some();
             let cell = Cell { output: oi, row, checked, expected: expected[oi].as_ref().and_then(|w| w.get(row).cloned()), actual, type_mismatch };

@@ -421,20 +421,21 @@ pub fn witness(t: &DecisionTable, rule: usize) -> Option<Vec<Option<Value>>> {
         cands.push(list);
     }
     let avoid = crate::eval::blockers(t, rule)?;
-    let mut live = vec![0u64; w];
+    let mut masks = vec![0u64; (ni + 1) * w];
     for &r in avoid.iter().chain([&rule]) {
-        live[r / 64] |= 1 << (r % 64);
+        masks[r / 64] |= 1 << (r % 64);
     }
     let mut pick = vec![0usize; ni];
     let mut nodes = 0usize;
-    let clean = fire(&cands, 0, &live, rule, &mut pick, &mut nodes);
+    let clean = fire(&cands, 0, w, &mut masks, rule, &mut pick, &mut nodes);
     if !clean {
         pick.iter_mut().for_each(|p| *p = 0);
     }
     Some(cands.into_iter().zip(pick).map(|(list, p)| list.into_iter().nth(p).and_then(|(v, _)| v)).collect())
 }
 
-fn fire(cands: &[Vec<(Option<Value>, Vec<u64>)>], c: usize, live: &[u64], rule: usize, pick: &mut [usize], nodes: &mut usize) -> bool {
+fn fire(cands: &[Vec<(Option<Value>, Vec<u64>)>], c: usize, w: usize, masks: &mut [u64], rule: usize, pick: &mut [usize], nodes: &mut usize) -> bool {
+    let (live, rest) = masks.split_at_mut(w);
     let only = live.iter().enumerate().all(|(i, &x)| x == if i == rule / 64 { 1 << (rule % 64) } else { 0 });
     if only {
         pick[c..].iter_mut().for_each(|p| *p = 0);
@@ -443,12 +444,11 @@ fn fire(cands: &[Vec<(Option<Value>, Vec<u64>)>], c: usize, live: &[u64], rule: 
     if c == cands.len() || *nodes > BUDGET {
         return false;
     }
-    let mut next = vec![0u64; live.len()];
     for (k, (_, m)) in cands[c].iter().enumerate() {
         *nodes += 1;
-        next.iter_mut().zip(live).zip(m).for_each(|((n, a), b)| *n = a & b);
+        rest[..w].iter_mut().zip(live.iter()).zip(m).for_each(|((n, a), b)| *n = a & b);
         pick[c] = k;
-        if fire(cands, c + 1, &next, rule, pick, nodes) {
+        if fire(cands, c + 1, w, rest, rule, pick, nodes) {
             return true;
         }
     }

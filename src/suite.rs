@@ -1,6 +1,6 @@
 use crate::eval::{Context, Outcome, Value, evaluate};
 use crate::model::*;
-use crate::verdict::{Expectation, check};
+use crate::verdict::{self, Expectation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
@@ -106,8 +106,8 @@ impl Suite {
 
 pub fn run_case(t: &DecisionTable, case: &Case) -> CaseResult {
     let outcome = evaluate(t, &context(t, case));
-    let v = check(t, &outcome, &case.expect);
-    CaseResult { pass: v.pass(), problems: v.problems, outcome }
+    let problems = verdict::problems(t, &outcome, &case.expect);
+    CaseResult { pass: problems.is_empty(), problems, outcome }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
