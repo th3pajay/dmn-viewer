@@ -24,7 +24,8 @@ fn fields(region: &str, weight: &str, express: &str, date: &str) -> Vec<String> 
 }
 
 fn set_fields(ws: &mut Workspace, values: Vec<String>) {
-    *ws.tests().fields_mut() = values;
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    ws.tests().set_inputs(&refs);
 }
 
 fn cell(rule: usize, text: &str) -> Edit {
@@ -40,7 +41,7 @@ fn live_outcome_follows_the_inputs() {
     let o = ws.tests().outcome().unwrap();
     assert_eq!(o.fired, vec![0]);
     assert!(Arc::ptr_eq(&o, &ws.tests().outcome().unwrap()), "unchanged inputs reuse the cached outcome");
-    ws.tests().fields_mut()[1] = "12".into();
+    ws.tests().set_input(1, "12");
     assert_eq!(ws.tests().outcome().unwrap().fired, vec![1]);
     ws.tests().clear_inputs();
     assert!(!ws.tests().is_active());
@@ -55,7 +56,7 @@ fn add_accept_and_delete_cases() {
     tests.add_case(" small ");
     let names: Vec<&str> = tests.suite().cases.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["Case 1", "small"]);
-    assert_eq!(tests.suite().decision, tests.defs.decisions[0].name, "an unnamed suite takes the decision's name");
+    assert_eq!(tests.suite().decision, "Shipping Fee", "an unnamed suite takes the decision's name");
     assert_eq!(tests.suite().cases[0].inputs["Weight"], serde_json::json!(2.5));
     assert_eq!(tests.suite().cases[0].expect.expect_rules, Some(vec![1]));
 
@@ -87,15 +88,14 @@ fn fill_inputs_from_a_case_or_a_rule() {
     let mut ws = Workspace::open(example("shipping-fees.dmn")).unwrap();
     let mut tests = ws.tests();
     tests.fill_from_case(0);
-    assert_eq!(tests.fields(), fields("EU", "2.5", "false", "20260314"));
+    assert_eq!(tests.inputs(), ["EU", "2.5", "false", "20260314"]);
 
-    let defs = tests.defs;
-    let table = defs.table(0).unwrap();
-    *tests.fields_mut() = fields("", "", "", "keep");
-    tests.fill_from_rule(&table.rules[0]);
-    assert_eq!(tests.fields()[0], "EU");
-    assert_eq!(tests.fields()[2], "false");
-    assert_eq!(tests.fields()[3], "keep", "an any (-) condition leaves the input alone");
+    tests.clear_inputs();
+    tests.set_input(3, "keep");
+    tests.fill_from_rule(0);
+    assert_eq!(tests.input(0), "EU");
+    assert_eq!(tests.input(2), "false");
+    assert_eq!(tests.input(3), "keep", "an any (-) condition leaves the input alone");
 }
 
 #[test]

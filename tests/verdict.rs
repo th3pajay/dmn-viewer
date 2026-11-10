@@ -134,7 +134,7 @@ fn the_tester_and_the_suite_agree_on_partial_cases() {
 fn the_tester_saves_multi_row_cases_as_arrays() {
     let mut ws = workspace("verdict-rows", &dmn(r#"hitPolicy="COLLECT""#, &[LEVEL], &LEVELS));
     let mut tests = ws.tests();
-    *tests.fields_mut() = vec!["9".into()];
+    tests.set_inputs(&["9"]);
     tests.add_case("all three");
     assert_eq!(tests.suite().cases[0].expect.expected["level"], json!(["low", "mid", "high"]));
     assert!(tests.results().unwrap()[0].pass);

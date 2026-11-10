@@ -125,12 +125,12 @@ fn jump_selects_scrolls_and_shows_the_rules() {
 fn changing_the_decision_clears_the_selection_and_the_tester_inputs() {
     let mut ws = clean("decision.dmn");
     ws.toggle_select(1);
-    *ws.tests().fields_mut() = vec!["\"EU\"".into()];
+    ws.tests().set_inputs(&["\"EU\""]);
     assert!(!ws.set_decision(0), "the same decision changes nothing");
     assert_eq!(ws.selected(), Some(1));
     assert!(ws.set_decision(1));
     assert_eq!((ws.decision(), ws.selected()), (1, None));
-    assert!(ws.tests().fields().is_empty());
+    assert!(!ws.tests().is_active());
 }
 
 #[test]
@@ -449,4 +449,93 @@ fn coverage_exists_only_for_a_suite_about_the_active_decision() {
     assert!(tests.coverage().is_some(), "a suite that names no decision matches any");
     tests.load(&empty).unwrap();
     assert!(tests.coverage().is_none());
+}
+
+fn three_inputs(input_ids: [&str; 3]) -> Workspace {
+    let input = |id: &str, e: &str| format!(r#"<input id="{id}" label="{e}"><inputExpression id="{id}{e}" typeRef="double"><text>{e}</text></inputExpression></input>"#);
+    let rule = |n: usize, a: &str, level: &str, amount: &str| {
+        format!(
+            r#"<rule id="r{n}"><inputEntry id="r{n}a"><text>{a}</text></inputEntry><inputEntry id="r{n}b"><text>-</text></inputEntry><inputEntry id="r{n}c"><text>-</text></inputEntry><outputEntry id="r{n}l"><text>"{level}"</text></outputEntry><outputEntry id="r{n}m"><text>{amount}</text></outputEntry></rule>"#
+        )
+    };
+    let xml = format!(
+        r#"<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/" id="D" name="D" namespace="x"><decision id="A" name="A"><decisionTable id="TA" hitPolicy="FIRST">{}{}{}<output id="ol" name="level" typeRef="string"/><output id="om" name="amount" typeRef="double"/>{}{}{}</decisionTable></decision><decision id="B" name="B"><decisionTable id="TB"><input id="bx"><inputExpression id="bxe" typeRef="double"><text>x</text></inputExpression></input><output id="bo" name="only" typeRef="string"/><rule id="b0"><inputEntry id="b0i"><text>-</text></inputEntry><outputEntry id="b0o"><text>"one"</text></outputEntry></rule></decisionTable></decision></definitions>"#,
+        input(input_ids[0], "a"),
+        input(input_ids[1], "b"),
+        input(input_ids[2], "c"),
+        rule(0, "&lt; 0", "neg", "0"),
+        rule(1, "&lt; 5", "low", "1"),
+        rule(2, "-", "high", "2"),
+    );
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let name = format!("session-{}.dmn", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    Workspace::open(scratch(&name, xml.as_bytes())).unwrap()
+}
+
+#[test]
+fn switching_decision_clears_inputs_expectation_and_target() {
+    let mut ws = three_inputs(["ia", "ib", "ic"]);
+    assert!(ws.tests().fill_to_fire(2));
+    ws.tests().snapshot();
+    assert!(ws.tests().verdict().unwrap().against.is_some());
+    assert!(ws.set_decision(1));
+    let mut tests = ws.tests();
+    assert_eq!((tests.target(), tests.is_active()), (None, false));
+    assert!(tests.verdict().unwrap().against.is_none(), "a snapshot of table A never reaches table B");
+    assert!(ws.set_decision(0));
+    assert!(ws.tests().verdict().unwrap().against.is_none());
+}
+
+#[test]
+fn inputs_stay_with_their_input_through_column_edits_and_undo() {
+    let mut ws = three_inputs(["ia", "ib", "ic"]);
+    ws.tests().set_inputs(&["7", "8", "9"]);
+    assert!(ws.commit_group(&[Edit::DeleteInput { decision: 0, input: 0 }], None));
+    assert_eq!(ws.tests().inputs(), ["8", "9"]);
+    assert!(ws.commit_group(&[Edit::InsertInput { decision: 0, at: 0 }], None));
+    assert_eq!(ws.tests().inputs()[1..], ["8", "9"]);
+    ws.undo();
+    ws.undo();
+    assert_eq!(ws.tests().inputs(), ["7", "8", "9"], "undo brings the deleted input's value back");
+}
+
+#[test]
+fn inputs_with_duplicate_ids_keep_separate_values() {
+    let mut ws = three_inputs(["dup", "dup", "ic"]);
+    ws.tests().set_inputs(&["1", "2", "3"]);
+    assert_eq!(ws.tests().inputs(), ["1", "2", "3"]);
+}
+
+#[test]
+fn the_rule_under_test_follows_moves_and_clears_on_delete() {
+    let mut ws = three_inputs(["ia", "ib", "ic"]);
+    assert!(ws.tests().fill_to_fire(1));
+    assert!(ws.commit_group(&[Edit::MoveRule { decision: 0, from: 1, to: 0 }], None));
+    assert_eq!(ws.tests().target(), Some(0));
+    assert_eq!(ws.tests().verdict().unwrap().against.as_deref(), Some("rule 1 outputs"));
+    assert!(ws.commit_group(&[Edit::DeleteRule { decision: 0, rule: 0 }], None));
+    assert_eq!(ws.tests().target(), None);
+    assert!(ws.tests().verdict().unwrap().against.is_none());
+    ws.undo();
+    assert_eq!(ws.tests().target(), Some(0), "undo restores the rule and the target with it");
+}
+
+#[test]
+fn a_snapshot_naming_a_deleted_output_fails_as_unknown() {
+    let mut ws = three_inputs(["ia", "ib", "ic"]);
+    ws.tests().set_inputs(&["1"]);
+    ws.tests().snapshot();
+    assert!(ws.tests().verdict().unwrap().pass());
+    assert!(ws.commit_group(&[Edit::DeleteOutput { decision: 0, output: 1 }], None));
+    let v = ws.tests().verdict().unwrap();
+    assert!(v.problems.contains(&"unknown output \"amount\"".to_string()), "{:?}", v.problems);
+}
+
+#[test]
+fn the_outcome_does_not_depend_on_the_test_tab() {
+    let mut ws = three_inputs(["ia", "ib", "ic"]);
+    ws.tests().set_input(0, "-1");
+    assert_eq!(ws.tests().outcome().unwrap().fired, vec![0]);
+    assert!(ws.commit_group(&[Edit::InsertInput { decision: 0, at: 3 }], None));
+    assert_eq!(ws.tests().outcome().unwrap().fired, vec![0]);
 }

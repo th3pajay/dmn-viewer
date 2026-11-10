@@ -143,7 +143,7 @@ fn session(c: &mut Criterion) {
     let path = scratch("sess.dmn", &xml);
     scratch("sess.tests.json", &suite(CASES));
     let mut ws = Workspace::open(path).unwrap();
-    *ws.tests().fields_mut() = vec!["EU".into(), "100.5".into(), "false".into(), "20260314".into()];
+    ws.tests().set_inputs(&["EU", "100.5", "false", "20260314"]);
     let mut g = c.benchmark_group("session");
     g.sample_size(30);
     ws.tests().results();

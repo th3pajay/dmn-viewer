@@ -59,17 +59,16 @@ fn an_unreachable_rule_still_gets_matching_values() {
 
 #[test]
 fn every_example_rule_fires_through_the_test_session() {
-    use dmn_viewer::session::TestSession;
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("shipping-fees.dmn");
-    let defs = parse::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let suite = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("shipping-fees.tests.json");
-    let n = defs.table(0).unwrap().rules.len();
+    let mut ws = dmn_viewer::workspace::Workspace::open(path).unwrap();
+    assert!(!ws.tests().suite().cases.is_empty());
+    let n = ws.defs().table(0).unwrap().rules.len();
     for r in 0..n {
-        let mut s = TestSession::default();
-        s.load(&suite).unwrap();
-        assert!(s.fill_to_fire(&defs, 0, r));
-        let o = s.outcome(&defs, 0).unwrap();
-        assert_eq!(o.fired, vec![r], "rule {}: {:?} {:?}", r + 1, s.fields(), o.error);
+        let mut tests = ws.tests();
+        tests.clear_inputs();
+        assert!(tests.fill_to_fire(r));
+        let o = tests.outcome().unwrap();
+        assert_eq!(o.fired, vec![r], "rule {}: {:?} {:?}", r + 1, tests.inputs(), o.error);
     }
 }
 

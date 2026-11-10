@@ -8,7 +8,7 @@ use dmn_viewer::eval::{RuleStatus, Value};
 use dmn_viewer::fix;
 use dmn_viewer::lint::{self, Column as Col, Issue, Severity};
 use dmn_viewer::model::*;
-use dmn_viewer::suite::{self, Coverage};
+use dmn_viewer::suite::Coverage;
 use dmn_viewer::unary::UnaryTests;
 use dmn_viewer::workspace::{Cursor, Editing, FixView, View, Workspace};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, TextWrapMode, vec2};
@@ -352,7 +352,6 @@ fn card<R>(ui: &mut egui::Ui, t: &Theme, add: impl FnOnce(&mut egui::Ui) -> R) -
 #[derive(Default)]
 struct Tester {
     case_name: String,
-    status: String,
     scroll_target: bool,
 }
 
@@ -655,12 +654,6 @@ impl App {
         } else {
             Workspace::open(path.clone()).map(|mut ws| {
                 self.tester = Tester::default();
-                if let Some(load) = ws.suite_load() {
-                    self.tester.status = match load {
-                        Ok(n) => format!("Loaded {n} cases from {}", suite::default_path(&path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
-                        Err(e) => e.clone(),
-                    };
-                }
                 if let Some(old) = self.loaded.as_ref() {
                     ws.adopt_view(old);
                 }
@@ -1233,12 +1226,10 @@ impl App {
         let t = self.theme;
         let (outcome, coverage) = {
             let Some(l) = self.loaded.as_mut() else { return };
-            let decision = l.decision();
             let mut tests = l.tests();
-            let defs = tests.defs;
-            match defs.table(decision) {
-                Some(tb) => {
-                    let outcome = if tests.is_active() && tests.fields().len() == tb.inputs.len() { tests.outcome() } else { None };
+            match tests.table() {
+                Some(_) => {
+                    let outcome = if tests.is_active() { tests.outcome() } else { None };
                     let coverage = tests.coverage();
                     (outcome, coverage)
                 }
@@ -2150,16 +2141,13 @@ fn summary_panel(ui: &mut egui::Ui, t: &Theme, v: &FixView, acts: &mut Vec<Act>)
 }
 
 fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tester: &mut Tester, t: &Theme, acts: &mut Vec<Act>) {
-    let decision = ws.decision();
     let mut tests = ws.tests();
-    let defs = tests.defs;
-    let Some(tb) = defs.table(decision) else {
+    let Some(tb) = tests.table() else {
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin::same(20))).show(ui, |ui| {
             ui.label(RichText::new("The tester works on decision tables. Pick one on the left.").color(t.muted));
         });
         return;
     };
-    tests.fields_mut().resize(tb.inputs.len(), String::new());
 
     egui::Panel::left("test_inputs").resizable(true).default_size(390.0).frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 20, right: 8, top: 16, bottom: 16 })).show(ui, |ui| {
         card(ui, t, |ui| {
@@ -2171,7 +2159,7 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                         tests.clear_inputs();
                     }
                     if ui.add_enabled_ui(selected.is_some(), |ui| small_button(ui, t, ic::IMPORT, "From rule")).inner.on_hover_text("Copy the selected rule's conditions into the inputs").clicked()
-                        && let Some(r) = selected.and_then(|r| tb.rules.get(r))
+                        && let Some(r) = selected.filter(|&r| r < tb.rules.len())
                     {
                         tests.fill_from_rule(r);
                     }
@@ -2186,7 +2174,9 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                         ui.label(RichText::new(inp.type_ref.clone().unwrap_or_default()).size(11.0).color(t.faint));
                     });
                     let hint = inp.input_values.clone().unwrap_or_else(|| "null".into());
-                    ui.add(egui::TextEdit::singleline(&mut tests.fields_mut()[i]).font(egui::TextStyle::Monospace).hint_text(hint).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                    if let Some(text) = tests.input_mut(i) {
+                        ui.add(egui::TextEdit::singleline(text).font(egui::TextStyle::Monospace).hint_text(hint).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                    }
                     ui.add_space(4.0);
                 }
             });
@@ -2211,7 +2201,7 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let default_name = suite::default_path(tests.path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let default_name = tests.default_suite_path().file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                     let mut save_to = None;
                     if small_button(ui, t, ic::SAVE, "Save as…").clicked() {
                         save_to = rfd::FileDialog::new().add_filter("Test suite", &["json"]).set_file_name(&default_name).save_file();
@@ -2222,20 +2212,13 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                     if small_button(ui, t, ic::OPEN, "Load…").clicked()
                         && let Some(p) = rfd::FileDialog::new().add_filter("Test suite", &["json"]).pick_file()
                     {
-                        tester.status = match tests.load(&p) {
-                            Ok(n) => format!("Loaded {n} cases"),
-                            Err(e) => e,
-                        };
+                        let _ = tests.load(&p);
                     }
                     if small_button(ui, t, ic::NEW, "New").clicked() {
                         tests.new_suite();
-                        tester.status = "New empty suite".into();
                     }
                     if let Some(p) = save_to {
-                        tester.status = match tests.save(&p) {
-                            Ok(n) => format!("Saved {n} cases"),
-                            Err(e) => e,
-                        };
+                        let _ = tests.save(&p);
                     }
                 });
             });
@@ -2245,7 +2228,7 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                     tests.add_case(&tester.case_name);
                     tester.case_name.clear();
                 }
-                ui.label(RichText::new(&tester.status).size(11.5).color(t.faint));
+                ui.label(RichText::new(tests.status()).size(11.5).color(t.faint));
             });
             if let Some(cov) = coverage.as_deref().filter(|_| !tests.suite().cases.is_empty()) {
                 coverage_line(ui, t, cov);

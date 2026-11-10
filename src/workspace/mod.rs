@@ -1,18 +1,19 @@
 mod document;
 mod fixing;
 mod rules;
+mod session;
 
 use crate::diff::Hunk;
 use crate::edit::Edit;
 use crate::eval::Outcome;
 use crate::export::{self, Format};
 use crate::lint::{Column, Issue};
-use crate::model::{Definitions, Rule};
-use crate::session::TestSession;
+use crate::model::{DecisionTable, Definitions};
 use crate::suite::{self, CaseResult, Coverage, Suite};
 use crate::verdict::Verdict;
 use document::Document;
 use fixing::{FixSession, Fixable};
+use session::TestSession;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -65,7 +66,6 @@ pub struct Workspace {
     skipped: HashSet<String>,
     skip_gen: u64,
     fixable: RefCell<Option<Fixable>>,
-    suite_load: Option<Result<usize, String>>,
     selected: Option<usize>,
     scroll_to: Option<usize>,
     view: View,
@@ -77,8 +77,8 @@ pub struct Workspace {
 
 pub struct Tests<'a> {
     session: &'a mut TestSession,
-    pub defs: &'a Definitions,
-    pub path: &'a Path,
+    defs: &'a Definitions,
+    path: &'a Path,
     decision: usize,
 }
 
@@ -87,7 +87,9 @@ impl Workspace {
         let doc = Document::open(path)?;
         let mut session = TestSession::default();
         let suite_file = suite::default_path(doc.path());
-        let suite_load = suite_file.exists().then(|| session.load(&suite_file));
+        if suite_file.exists() {
+            let _ = session.load(&suite_file);
+        }
         let error = (!doc.editable).then(|| READ_ONLY.to_string());
         Ok(Workspace {
             doc,
@@ -97,7 +99,6 @@ impl Workspace {
             skipped: HashSet::new(),
             skip_gen: 0,
             fixable: RefCell::new(None),
-            suite_load,
             selected: None,
             scroll_to: None,
             view: View::default(),
@@ -122,10 +123,6 @@ impl Workspace {
         self.scroll_to = None;
         self.error = (!self.doc.editable).then(|| READ_ONLY.to_string());
         Ok(())
-    }
-
-    pub fn suite_load(&self) -> Option<&Result<usize, String>> {
-        self.suite_load.as_ref()
     }
 
     pub fn defs(&self) -> &Definitions {
@@ -182,7 +179,7 @@ impl Workspace {
             return false;
         }
         self.decision = decision;
-        self.session.clear_fields();
+        self.session.change_decision();
         self.selected = None;
         true
     }
@@ -460,18 +457,44 @@ impl Workspace {
     }
 
     pub fn tests(&mut self) -> Tests<'_> {
-        self.session.sync(self.doc.revision());
+        self.session.sync(self.doc.revision(), &self.doc.defs, self.decision);
         Tests { session: &mut self.session, defs: &self.doc.defs, path: self.doc.path(), decision: self.decision }
     }
 }
 
-impl Tests<'_> {
-    pub fn fields(&self) -> &[String] {
-        self.session.fields()
+impl<'a> Tests<'a> {
+    pub fn table(&self) -> Option<&'a DecisionTable> {
+        self.defs.table(self.decision)
     }
 
-    pub fn fields_mut(&mut self) -> &mut Vec<String> {
-        self.session.fields_mut()
+    pub fn default_suite_path(&self) -> PathBuf {
+        suite::default_path(self.path)
+    }
+
+    pub fn status(&self) -> &str {
+        self.session.status()
+    }
+
+    pub fn input(&self, col: usize) -> &str {
+        self.session.input(col)
+    }
+
+    pub fn input_mut(&mut self, col: usize) -> Option<&mut String> {
+        self.session.input_mut(col)
+    }
+
+    pub fn inputs(&self) -> Vec<&str> {
+        self.session.inputs()
+    }
+
+    pub fn set_input(&mut self, col: usize, text: &str) {
+        self.session.set_input(col, text.to_string());
+    }
+
+    pub fn set_inputs(&mut self, values: &[&str]) {
+        for (c, v) in values.iter().enumerate() {
+            self.session.set_input(c, v.to_string());
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -483,7 +506,7 @@ impl Tests<'_> {
     }
 
     pub fn target(&self) -> Option<usize> {
-        self.session.target().filter(|&r| self.defs.table(self.decision).is_some_and(|t| r < t.rules.len()))
+        self.session.target(self.defs, self.decision)
     }
 
     pub fn clear_target(&mut self) {
@@ -543,8 +566,8 @@ impl Tests<'_> {
         self.session.fill_from_case(self.defs, self.decision, i);
     }
 
-    pub fn fill_from_rule(&mut self, rule: &Rule) {
-        self.session.fill_from_rule(rule);
+    pub fn fill_from_rule(&mut self, rule: usize) {
+        self.session.fill_from_rule(self.defs, self.decision, rule);
     }
 
     pub fn fill_to_fire(&mut self, rule: usize) -> bool {

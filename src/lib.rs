@@ -8,7 +8,6 @@ pub mod lint;
 pub mod model;
 pub mod parse;
 pub mod report;
-pub mod session;
 pub mod suite;
 pub mod targets;
 pub mod unary;
