@@ -8,8 +8,9 @@ use crate::eval::Outcome;
 use crate::export::{self, Format};
 use crate::lint::{Column, Issue};
 use crate::model::{Definitions, Rule};
-use crate::session::{Expected, TestSession};
+use crate::session::TestSession;
 use crate::suite::{self, CaseResult, Coverage, Suite};
+use crate::verdict::Verdict;
 use document::Document;
 use fixing::{FixSession, Fixable};
 use std::cell::RefCell;
@@ -497,8 +498,8 @@ impl Tests<'_> {
         self.session.snapshot(self.defs, self.decision);
     }
 
-    pub fn expected(&mut self) -> Arc<Option<Expected>> {
-        self.session.expected(self.defs, self.decision)
+    pub fn verdict(&mut self) -> Option<Arc<Verdict>> {
+        self.session.verdict(self.defs, self.decision)
     }
 
     pub fn suite(&self) -> &Suite {

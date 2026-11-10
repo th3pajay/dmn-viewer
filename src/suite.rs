@@ -1,14 +1,11 @@
 use crate::eval::{Context, Outcome, Value, evaluate};
 use crate::model::*;
+use crate::verdict::{Expectation, check};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-fn is_false(b: &bool) -> bool {
-    !*b
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Suite {
@@ -23,12 +20,8 @@ pub struct Case {
     pub name: String,
     #[serde(default)]
     pub inputs: BTreeMap<String, J>,
-    #[serde(default)]
-    pub expected: BTreeMap<String, J>,
-    #[serde(default, rename = "expectError", skip_serializing_if = "is_false")]
-    pub expect_error: bool,
-    #[serde(default, rename = "expectRules", skip_serializing_if = "Option::is_none")]
-    pub expect_rules: Option<Vec<usize>>,
+    #[serde(flatten)]
+    pub expect: Expectation,
 }
 
 pub struct CaseResult {
@@ -113,34 +106,8 @@ impl Suite {
 
 pub fn run_case(t: &DecisionTable, case: &Case) -> CaseResult {
     let outcome = evaluate(t, &context(t, case));
-    let mut problems = Vec::new();
-    if case.expect_error {
-        if outcome.error.is_none() {
-            problems.push("expected an evaluation error, but the decision returned a result".into());
-        }
-    } else if let Some(e) = &outcome.error {
-        problems.push(format!("evaluation failed: {e}"));
-    } else {
-        for (name, exp) in &case.expected {
-            match t.outputs.iter().position(|o| o.name == *name || o.label == *name) {
-                None => problems.push(format!("unknown output \"{name}\"")),
-                Some(idx) => {
-                    let want = json_to_value(exp, t.outputs[idx].type_ref.as_deref());
-                    let got = outcome.output(idx);
-                    if got != want {
-                        problems.push(format!("{name}: expected {}, got {}", want.display(), got.display()));
-                    }
-                }
-            }
-        }
-    }
-    if let Some(rules) = &case.expect_rules {
-        let fired: Vec<usize> = outcome.fired.iter().map(|r| r + 1).collect();
-        if *rules != fired {
-            problems.push(format!("expected rules {rules:?} to fire, got {fired:?}"));
-        }
-    }
-    CaseResult { pass: problems.is_empty(), problems, outcome }
+    let v = check(t, &outcome, &case.expect);
+    CaseResult { pass: v.pass(), problems: v.problems, outcome }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -200,14 +167,7 @@ pub fn targets(decision: &str, d: &Decision) -> bool {
 }
 
 pub fn case_from_outcome(name: String, t: &DecisionTable, inputs: BTreeMap<String, J>, outcome: &Outcome) -> Case {
-    let mut expected = BTreeMap::new();
-    if outcome.error.is_none() {
-        for (i, o) in t.outputs.iter().enumerate() {
-            let key = if o.name.is_empty() { o.label.clone() } else { o.name.clone() };
-            expected.insert(key, value_to_json(&outcome.output(i)));
-        }
-    }
-    Case { name, inputs, expected, expect_error: outcome.error.is_some(), expect_rules: Some(outcome.fired.iter().map(|r| r + 1).collect()) }
+    Case { name, inputs, expect: Expectation::of_outcome(t, outcome) }
 }
 
 pub fn load(path: &Path) -> Result<Suite, String> {

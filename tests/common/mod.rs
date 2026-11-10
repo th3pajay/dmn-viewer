@@ -50,3 +50,12 @@ pub fn table(xml: &str) -> DecisionTable {
 
 pub const LEVELS: [(&str, &[&str]); 3] = [(">= 0", &[r#""low""#]), (">= 5", &[r#""mid""#]), (">= 8", &[r#""high""#])];
 pub const AMOUNTS: [(&str, &[&str]); 3] = [(">= 0", &["1"]), (">= 5", &["2"]), (">= 8", &["3"])];
+
+pub fn workspace(name: &str, xml: &str) -> dmn_viewer::workspace::Workspace {
+    let dir = std::env::temp_dir().join(format!("dmn-viewer-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("table.dmn");
+    std::fs::write(&path, xml).unwrap();
+    let _ = std::fs::remove_file(dir.join("table.tests.json"));
+    dmn_viewer::workspace::Workspace::open(path).unwrap()
+}

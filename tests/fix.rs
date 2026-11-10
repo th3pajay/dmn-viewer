@@ -74,7 +74,7 @@ fn case(name: &str, region: &str, weight: f64, carrier: &str) -> Case {
     let mut c = Case { name: name.into(), ..Case::default() };
     c.inputs.insert("Region".into(), region.into());
     c.inputs.insert("Weight".into(), weight.into());
-    c.expected.insert("Carrier".into(), carrier.into());
+    c.expect.expected.insert("Carrier".into(), carrier.into());
     c
 }
 

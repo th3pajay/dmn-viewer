@@ -57,7 +57,7 @@ fn add_accept_and_delete_cases() {
     assert_eq!(names, ["Case 1", "small"]);
     assert_eq!(tests.suite().decision, tests.defs.decisions[0].name, "an unnamed suite takes the decision's name");
     assert_eq!(tests.suite().cases[0].inputs["Weight"], serde_json::json!(2.5));
-    assert_eq!(tests.suite().cases[0].expect_rules, Some(vec![1]));
+    assert_eq!(tests.suite().cases[0].expect.expect_rules, Some(vec![1]));
 
     let r = tests.results().unwrap();
     assert!(r.iter().all(|r| r.pass));
@@ -72,7 +72,7 @@ fn add_accept_and_delete_cases() {
 fn accept_replaces_expectations_with_the_actual_result() {
     let mut ws = Workspace::open(example("shipping-fees.dmn")).unwrap();
     let mut broken = ws.tests().suite().clone();
-    broken.cases[0].expected.insert("Fee".into(), serde_json::json!(999));
+    broken.cases[0].expect.expected.insert("Fee".into(), serde_json::json!(999));
     let dir = scratch_dir("accept");
     std::fs::write(dir.join("broken.json"), serde_json::to_string(&broken).unwrap()).unwrap();
     let mut tests = ws.tests();
@@ -191,16 +191,16 @@ fn reloading_the_file_keeps_the_suite_and_refreshes_the_results() {
 fn testing_a_rule_expects_its_output_cells_and_follows_edits() {
     use dmn_viewer::eval::Value;
     let mut ws = fresh("expect-rule");
-    assert!(ws.tests().expected().is_none());
+    assert!(ws.tests().verdict().unwrap().against.is_none());
     assert!(ws.tests().fill_to_fire(0));
     assert_eq!(ws.tests().target(), Some(0));
-    let e = ws.tests().expected();
-    assert_eq!(e.as_ref().as_ref().unwrap().values[0], Value::Num(4.5));
+    let v = ws.tests().verdict().unwrap();
+    assert_eq!(v.cells[0].expected, Some(Value::Num(4.5)));
     assert!(ws.commit_group(&[cell(0, "7")], None));
-    let e = ws.tests().expected();
-    assert_eq!(e.as_ref().as_ref().unwrap().values[0], Value::Num(7.0));
+    let v = ws.tests().verdict().unwrap();
+    assert_eq!(v.cells[0].expected, Some(Value::Num(7.0)));
     ws.tests().clear_target();
-    assert!(ws.tests().expected().is_none());
+    assert!(ws.tests().verdict().unwrap().against.is_none());
 }
 
 #[test]
@@ -210,16 +210,14 @@ fn expected_follows_cases_snapshots_and_deletions() {
     set_fields(&mut ws, fields("\"EU\"", "2.5", "false", "\"20260314\""));
     ws.tests().add_case("first");
     ws.tests().add_case("second");
-    let e = ws.tests().expected();
-    assert!(e.as_ref().as_ref().unwrap().label.contains("second"));
+    assert!(ws.tests().verdict().unwrap().against.as_deref().unwrap().contains("second"));
     ws.tests().delete(0);
-    let e = ws.tests().expected();
-    assert!(e.as_ref().as_ref().unwrap().label.contains("second"));
+    assert!(ws.tests().verdict().unwrap().against.as_deref().unwrap().contains("second"));
     ws.tests().delete(0);
-    assert!(ws.tests().expected().is_none());
+    assert!(ws.tests().verdict().unwrap().against.is_none());
     ws.tests().snapshot();
-    let e = ws.tests().expected();
-    assert_eq!(e.as_ref().as_ref().unwrap().values[0], Value::Num(4.5));
+    let v = ws.tests().verdict().unwrap();
+    assert_eq!(v.cells[0].expected, Some(Value::Num(4.5)));
     ws.tests().clear_expected();
-    assert!(ws.tests().expected().is_none());
+    assert!(ws.tests().verdict().unwrap().against.is_none());
 }

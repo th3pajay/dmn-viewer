@@ -1,4 +1,5 @@
 use dmn_viewer::suite::{self, Coverage, Suite};
+use dmn_viewer::verdict::Expectation;
 use dmn_viewer::{model::Definitions, parse};
 use serde_json::json;
 use std::path::PathBuf;
@@ -31,7 +32,7 @@ fn counts_cases_per_rule_and_rules_fired_only_by_failing_cases() {
     let defs = defs();
     let mut s = suite::load(&example("shipping-fees.tests.json")).unwrap();
     s.cases.retain(|c| ["EU small parcel", "EU parcel at the 5 kg boundary", "EU medium parcel", "NA express"].contains(&c.name.as_str()));
-    s.cases[3].expected.insert("Fee".into(), json!(1));
+    s.cases[3].expect.expected.insert("Fee".into(), json!(1));
     let cov = coverage(&defs, &s);
     assert_eq!(&cov.fired_by[..4], &[(2, 0), (1, 0), (0, 0), (0, 1)]);
     assert_eq!(cov.covered(), 3, "a rule only failing cases fire still counts as covered");
@@ -70,7 +71,11 @@ fn a_big_suite_runs_in_parallel_with_the_same_results_in_the_same_order() {
         .map(|k| {
             let n = k % 130;
             let want = if n < 120 { format!("r{n}") } else { "none".to_string() };
-            Case { name: format!("case {k}"), inputs: [("N".to_string(), serde_json::json!(n))].into(), expected: [("Out".to_string(), serde_json::json!(want))].into(), ..Case::default() }
+            Case {
+                name: format!("case {k}"),
+                inputs: [("N".to_string(), serde_json::json!(n))].into(),
+                expect: Expectation { expected: [("Out".to_string(), serde_json::json!(want))].into(), ..Expectation::default() },
+            }
         })
         .collect();
     let s = Suite { decision: "D".into(), cases };

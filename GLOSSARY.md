@@ -8,12 +8,13 @@ Domain terms used in code, docs and reviews. Use these names; don't invent synon
 - **Output entry**: a rule's cell for one output. Its text is an expression that produces the output value.
 - **Unary test**: the condition in an input entry, tested against the input's value, e.g. `"EU"`, `<= 5`, `[1..10]`, `not("A","B")` or `-` (any). FEEL syntax by default.
 - **Expression language**: the language a cell or input expression is evaluated in (FEEL, JavaScript, JUEL, or an unsupported one), together with where it was set: on the cell, as the file default, or not set (FEEL). The parser resolves it once; nothing else re-derives it. `model::ExpressionLanguage`.
-- **Hit policy**: how a table combines matching rules: UNIQUE, FIRST, ANY, PRIORITY, COLLECT (optionally with an aggregation), OUTPUT ORDER, RULE ORDER.
+- **Hit policy**: how a table combines matching rules: UNIQUE, FIRST, ANY, PRIORITY, COLLECT (optionally with an aggregation: SUM, COUNT, MIN, MAX), OUTPUT ORDER, RULE ORDER. COLLECT with no aggregation, RULE ORDER and OUTPUT ORDER return one result row per fired rule. An unrecognised hit policy or aggregation is an error, never a fallback.
 - **Test suite**: the `<name>.tests.json` file next to a DMN file: a decision name plus test cases.
-- **Test case**: named inputs and the expected outputs and/or fired rules.
+- **Test case**: named inputs and an expectation.
 - **Input binding**: how a table input finds its value among named values: by its input expression, falling back to its label.
-- **Test session**: the tester's working state for one decision table: the current inputs, the loaded test suite and their evaluated results.
-- **Expected result**: what the tester compares the actual result against: the output cells of the rule under test, a saved case, or a snapshot of an earlier result. `session::Expect`.
+- **Test session**: the tester's working state for the active decision table: the current inputs, the expectation, the rule under test, the loaded test suite and their evaluated results. Each input value belongs to its input, and the rule under test stays the same rule, through column and rule edits and undo. Switching decision clears everything except the test suite.
+- **Expectation**: what a result is checked against: expected values for some outputs (one per result row when the hit policy returns several rows), the rules expected to fire, or an expected error. It comes from a test case, a snapshot of an earlier result, or the rule under test. Outputs it doesn't list are not checked. _Avoid_: expected result.
+- **Verdict**: an expectation checked against an actual result: pass or fail, with a match or mismatch per output cell and for the fired rules. The suite run and the tester compute it the same way.
 - **Rule coverage**: which rules a test suite's cases fire; a rule fired only by failing cases is counted separately. `suite::Coverage`.
 - **Issue**: one finding of the checks, with a severity, a code (e.g. `UNREACHABLE_RULE`) and the decision, rules and column it is about. `lint::Issue`.
 - **Fix**: one way to resolve an issue, as edits the user confirms; a fix that deletes a rule or column is destructive and never pre-selected. `fix::Fix`.

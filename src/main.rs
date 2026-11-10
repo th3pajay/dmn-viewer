@@ -2297,9 +2297,9 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
         });
     });
 
-    let expected = tests.expected();
+    let verdict = tests.verdict().expect("decision is a table");
     let target = tests.target();
-    let verdict = expected.as_ref().as_ref().filter(|_| outcome.error.is_none()).map(|e| (e, e.values.iter().enumerate().filter(|(i, v)| outcome.output(*i) != **v).count()));
+    let against = verdict.against.as_deref();
     let mut add_case = false;
     let mut snapshot = false;
     let mut clear_expected = false;
@@ -2368,77 +2368,110 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                 });
                 ui.add_space(6.0);
             }
+            let (bg, fg) = match against {
+                None => (t.chip, t.muted),
+                Some(_) if verdict.pass() => (t.accent_soft, t.accent),
+                Some(_) => (bad_bg, t.error_text),
+            };
             if let Some(e) = &outcome.error {
                 Frame::new().fill(bad_bg).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(10)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(bold("Evaluation fails in Camunda", 12.5).color(t.error_text));
                     ui.add(egui::Label::new(RichText::new(e).size(12.5).color(t.error_text)).wrap());
                 });
+                if let Some(a) = against {
+                    ui.add_space(6.0);
+                    Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(9)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let text = if verdict.pass() { format!("{} Pass: {a} expects this error", ic::CHECK) } else { format!("{} Fail: {a} expects a result", ic::X) };
+                        ui.label(bold(text, 12.5).color(fg));
+                    });
+                }
             } else {
-                let (bg, fg) = match verdict {
-                    None => (t.chip, t.muted),
-                    Some((_, 0)) => (t.accent_soft, t.accent),
-                    Some(_) => (bad_bg, t.error_text),
-                };
                 Frame::new().fill(bg).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(9)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        match verdict {
+                        match against {
                             None => ui.label(bold("No expected result", 12.5).color(fg)),
-                            Some((e, 0)) => ui.label(bold(format!("{} Pass: all {} values match {}", ic::CHECK, e.values.len(), e.label), 12.5).color(fg)),
-                            Some((e, n)) => ui.label(bold(format!("{} Fail: {n} of {} values differ from {}", ic::X, e.values.len(), e.label), 12.5).color(fg)),
+                            Some(a) if verdict.pass() => ui.label(bold(format!("{} Pass: all {} checks match {a}", ic::CHECK, verdict.checks), 12.5).color(fg)),
+                            Some(a) => ui.label(bold(format!("{} Fail: {} of {} checks differ from {a}", ic::X, verdict.failed.max(1), verdict.checks.max(1)), 12.5).color(fg)),
                         };
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if verdict.is_some() && small_button(ui, t, ic::X, "").on_hover_text("Forget the expected result").clicked() {
+                            if against.is_some() && small_button(ui, t, ic::X, "").on_hover_text("Forget the expected result").clicked() {
                                 clear_expected = true;
                             }
-                            if small_button(ui, t, ic::CHECK, if verdict.is_none() { "Use actual as expected" } else { "Accept actual" }).clicked() {
+                            if small_button(ui, t, ic::CHECK, if against.is_none() { "Use actual as expected" } else { "Accept actual" }).clicked() {
                                 snapshot = true;
                             }
                         });
                     });
+                    if against.is_some() && !verdict.pass() {
+                        for p in &verdict.problems {
+                            ui.label(RichText::new(p).size(11.5).color(t.error_text));
+                        }
+                    }
                 });
                 if outcome.fired.is_empty() {
                     ui.label(RichText::new("No rule matched, so every output is null.").color(t.warn_text));
                 }
                 ui.add_space(6.0);
-                let nrows = if outcome.aggregate.is_some() { 1 } else { outcome.rows.len().max(1) };
+                let multi = verdict.rows > 1;
                 egui::Grid::new("out_grid").num_columns(5).spacing([18.0, 7.0]).show(ui, |ui| {
-                    for h in ["Output", "Expected", "Actual", "Type", ""] {
-                        ui.label(RichText::new(h.to_uppercase()).size(10.5).color(t.faint));
+                    for h in ["OUTPUT", "EXPECTED", "ACTUAL", "TYPE", ""] {
+                        ui.label(RichText::new(h).size(10.5).color(t.faint));
                     }
                     ui.end_row();
-                    for ri in 0..nrows {
-                        for (oi, out) in tb.outputs.iter().enumerate() {
-                            let actual = if ri == 0 { outcome.output(oi) } else { outcome.rows[ri].get(oi).cloned().unwrap_or(Value::Null) };
-                            let want = verdict.filter(|_| ri == 0).map(|(e, _)| &e.values[oi]);
-                            let name = match (&outcome.aggregate, nrows) {
-                                (Some(_), _) if oi == 0 => format!("{} ({})", out.title(), tb.hit_policy.aggregation().map_or("", Aggregation::name)),
-                                (None, n) if n > 1 => format!("{} #{}", out.title(), ri + 1),
-                                _ => out.title().to_string(),
-                            };
-                            ui.label(RichText::new(name).color(t.muted));
-                            match want {
-                                Some(w) => value_cell(ui, t, w, t.chip, t.text),
-                                None => {
-                                    ui.label(RichText::new("-").color(t.faint));
-                                }
+                    for c in &verdict.cells {
+                        let out = &tb.outputs[c.output];
+                        let title = out.title();
+                        match (&outcome.aggregate, multi) {
+                            (Some(_), _) if c.output == 0 => ui.label(RichText::new(format!("{title} ({})", tb.hit_policy.aggregation().map_or("", Aggregation::name))).color(t.muted)),
+                            (None, true) => ui.label(RichText::new(format!("{title} #{}", c.row + 1)).color(t.muted)),
+                            _ => ui.label(RichText::new(title).color(t.muted)),
+                        };
+                        match (&c.expected, c.checked) {
+                            (Some(w), true) => value_cell(ui, t, w, t.chip, t.text),
+                            (None, true) => {
+                                ui.label(RichText::new("no row").color(t.faint));
                             }
-                            let (abg, afg) = match want {
-                                Some(w) if *w == actual => (t.accent_soft, t.accent),
-                                Some(_) => (bad_bg, t.error_text),
-                                None => (t.chip, t.text),
-                            };
-                            value_cell(ui, t, &actual, abg, afg);
-                            let mismatch = out.type_ref.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("string")) && !matches!(actual, Value::Str(_) | Value::Null);
-                            ui.label(RichText::new(format!("{} / {}", actual.type_name(), out.type_ref.as_deref().unwrap_or("-"))).size(11.5).color(if mismatch { t.error_text } else { t.faint }));
-                            match want {
-                                Some(w) if *w == actual => ui.label(bold(ic::CHECK, 13.0).color(t.accent)),
-                                Some(_) => ui.label(bold(ic::X, 13.0).color(t.error)),
-                                None => ui.label(RichText::new("·").color(t.faint)),
-                            };
-                            ui.end_row();
+                            _ => {
+                                ui.label(RichText::new("-").color(t.faint));
+                            }
                         }
+                        let (abg, afg) = match (c.checked, c.matches()) {
+                            (true, true) => (t.accent_soft, t.accent),
+                            (true, false) => (bad_bg, t.error_text),
+                            _ => (t.chip, t.text),
+                        };
+                        match &c.actual {
+                            Some(a) => {
+                                value_cell(ui, t, a, abg, afg);
+                                ui.label(RichText::new(format!("{} / {}", a.type_name(), out.type_ref.as_deref().unwrap_or("-"))).size(11.5).color(if c.type_mismatch {
+                                    t.error_text
+                                } else {
+                                    t.faint
+                                }));
+                            }
+                            None => {
+                                ui.label(RichText::new("no row").color(if c.checked { t.error_text } else { t.faint }));
+                                ui.label("");
+                            }
+                        }
+                        match (c.checked, c.matches()) {
+                            (true, true) => ui.label(bold(ic::CHECK, 13.0).color(t.accent)),
+                            (true, false) => ui.label(bold(ic::X, 13.0).color(t.error)),
+                            _ => ui.label(RichText::new("·").color(t.faint)),
+                        };
+                        ui.end_row();
+                    }
+                    if let Some((want, got)) = &verdict.rules {
+                        let ok = want == got;
+                        ui.label(RichText::new("Fired rules").color(t.muted));
+                        ui.label(RichText::new(rule_list(want)).font(FontId::monospace(12.0)).color(t.text));
+                        ui.label(RichText::new(rule_list(got)).font(FontId::monospace(12.0)).color(if ok { t.accent } else { t.error_text }));
+                        ui.label("");
+                        ui.label(bold(if ok { ic::CHECK } else { ic::X }, 13.0).color(if ok { t.accent } else { t.error }));
+                        ui.end_row();
                     }
                 });
             }
@@ -2504,6 +2537,10 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
         tests.add_case(&tester.case_name);
         tester.case_name.clear();
     }
+}
+
+fn rule_list(rules: &[usize]) -> String {
+    if rules.is_empty() { "none".into() } else { rules.iter().map(usize::to_string).collect::<Vec<_>>().join(", ") }
 }
 
 fn value_cell(ui: &mut egui::Ui, t: &Theme, v: &Value, bg: Color32, fg: Color32) {

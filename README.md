@@ -96,6 +96,8 @@ A `<name>.tests.json` next to `<name>.dmn` is loaded automatically:
 }
 ```
 
+Only the outputs a case lists are checked. For COLLECT (with no aggregation), RULE ORDER and OUTPUT ORDER tables, give one value per result row: `"expected": { "Fee": [4.5, 2] }`. A single value means exactly one row.
+
 </details>
 
 <details>

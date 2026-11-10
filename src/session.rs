@@ -1,6 +1,7 @@
 use crate::eval::{self, Context, Outcome, Value};
 use crate::model::*;
 use crate::suite::{self, CaseResult, Coverage, Suite, bound, case_from_outcome, value_to_json};
+use crate::verdict::{Expectation, Verdict, check};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,22 +13,16 @@ pub enum Expect {
     None,
     Rule(usize),
     Case(usize),
-    Snapshot(Vec<Value>),
+    Snapshot(Expectation),
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Expected {
-    pub label: String,
-    pub values: Vec<Value>,
-}
-
-type ExpectedKey = (usize, Expect, Vec<String>, u64);
+type VerdictKey = (usize, Expect, Vec<String>, u64);
 
 #[derive(Default)]
 pub struct TestSession {
     expect: Expect,
     target: Option<usize>,
-    expected: Option<(ExpectedKey, Arc<Option<Expected>>)>,
+    verdict: Option<(VerdictKey, Arc<Verdict>)>,
     fields: Vec<String>,
     suite: Suite,
     suite_path: Option<PathBuf>,
@@ -91,41 +86,45 @@ impl TestSession {
     pub fn snapshot(&mut self, defs: &Definitions, decision: usize) {
         let Some(o) = self.outcome(defs, decision) else { return };
         let Some((t, _)) = table(defs, decision) else { return };
-        if o.error.is_none() {
-            self.expect = Expect::Snapshot((0..t.outputs.len()).map(|i| o.output(i)).collect());
-        }
+        self.expect = Expect::Snapshot(Expectation::of_outcome(t, &o));
     }
 
-    pub fn expected(&mut self, defs: &Definitions, decision: usize) -> Arc<Option<Expected>> {
-        if let Some(((d, expect, fields, gen_), e)) = &self.expected
+    pub fn verdict(&mut self, defs: &Definitions, decision: usize) -> Option<Arc<Verdict>> {
+        if let Some(((d, expect, fields, gen_), v)) = &self.verdict
             && *d == decision
             && *expect == self.expect
             && *fields == self.fields
             && *gen_ == self.suite_gen
         {
-            return e.clone();
+            return Some(v.clone());
         }
-        let e = Arc::new(self.build_expected(defs, decision));
-        self.expected = Some(((decision, self.expect.clone(), self.fields.clone(), self.suite_gen), e.clone()));
-        e
+        let v = Arc::new(self.build_verdict(defs, decision)?);
+        self.verdict = Some(((decision, self.expect.clone(), self.fields.clone(), self.suite_gen), v.clone()));
+        Some(v)
     }
 
-    fn build_expected(&self, defs: &Definitions, decision: usize) -> Option<Expected> {
+    fn build_verdict(&mut self, defs: &Definitions, decision: usize) -> Option<Verdict> {
+        let o = self.outcome(defs, decision)?;
         let (t, _) = table(defs, decision)?;
-        match &self.expect {
-            Expect::None => None,
-            Expect::Snapshot(values) => Some(Expected { label: "the saved result".into(), values: values.clone() }),
-            Expect::Case(i) => {
-                let c = self.suite.cases.get(*i).filter(|c| !c.expect_error)?;
-                let values =
-                    t.outputs.iter().map(|o| c.expected.get(&o.name).or_else(|| c.expected.get(&o.label)).map(|j| suite::json_to_value(j, o.type_ref.as_deref())).unwrap_or(Value::Null)).collect();
-                Some(Expected { label: format!("case \"{}\"", c.name), values })
-            }
+        let rule;
+        let (against, e) = match &self.expect {
+            Expect::None => (None, None),
+            Expect::Snapshot(x) => (Some("the saved result".to_string()), Some(x)),
+            Expect::Case(i) => match self.suite.cases.get(*i) {
+                Some(c) => (Some(format!("case \"{}\"", c.name)), Some(&c.expect)),
+                None => (None, None),
+            },
             Expect::Rule(r) => {
-                let values = (*r < t.rules.len()).then(|| eval::rule_outputs(t, *r, &self.context(t)).ok()).flatten()?;
-                Some(Expected { label: format!("rule {} outputs", r + 1), values })
+                rule = (*r < t.rules.len()).then(|| Expectation::of_rule(t, *r, &self.context(t))).flatten();
+                match &rule {
+                    Some(x) => (Some(format!("rule {} outputs", r + 1)), Some(x)),
+                    None => (None, None),
+                }
             }
-        }
+        };
+        let mut v = check(t, &o, e.unwrap_or(&Expectation::default()));
+        v.against = against;
+        Some(v)
     }
 
     fn shift_expect(&mut self, deleted: usize) {
@@ -143,7 +142,7 @@ impl TestSession {
     }
 
     pub fn invalidate(&mut self) {
-        self.expected = None;
+        self.verdict = None;
         self.live = None;
         self.results = None;
     }
