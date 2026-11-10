@@ -48,6 +48,7 @@ impl Issue {
             "RULE_SHAPE" => "Malformed rule",
             "OUTPUT_NAME" => "Output name problem",
             "DUPLICATE_ID" => "Duplicate id",
+            "UNKNOWN_HIT_POLICY" => "Unknown hit policy",
             "DANGLING_REQUIREMENT" => "Missing requirement target",
             "NO_LOGIC" => "Decision has no logic",
             "JAVASCRIPT" => "JavaScript expressions",
@@ -407,9 +408,12 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
     let mut push = |severity, code, rules: Vec<usize>, column, message: String| {
         v.push(Issue { severity, code, decision: Some(di), rules, column, message });
     };
-    let hp = t.hit_policy.to_ascii_uppercase();
+    let hp = &t.hit_policy;
     let ni = t.inputs.len();
     let no = t.outputs.len();
+    if let Some(m) = hp.unsupported() {
+        push(Severity::Error, "UNKNOWN_HIT_POLICY", vec![], None, format!("{m}. The table cannot be evaluated."));
+    }
 
     for (ri, r) in t.rules.iter().enumerate() {
         if r.inputs.len() != ni || r.outputs.len() != no {
@@ -438,9 +442,9 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
     let shaped = |ri: usize| tests[ri].len() == ni;
 
     let live: Vec<usize> = (0..t.rules.len()).filter(|&r| shaped(r)).collect();
-    let relation: Option<fn(&Cond, &Cond) -> bool> = match hp.as_str() {
-        "FIRST" => Some(covers),
-        "UNIQUE" | "ANY" => Some(overlapping),
+    let relation: Option<fn(&Cond, &Cond) -> bool> = match hp {
+        HitPolicy::First => Some(covers),
+        HitPolicy::Unique | HitPolicy::Any => Some(overlapping),
         _ => None,
     };
     let cols: Vec<Interned> = (0..ni).map(|c| Interned::new(&tests, &live, c, relation)).collect();
@@ -458,7 +462,7 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
         Some(rel) => {
             let mut order: Vec<usize> = (0..ni).collect();
             order.sort_by_key(|&c| std::cmp::Reverse(cols[c].reps.len()));
-            let covering = hp == "FIRST";
+            let covering = *hp == HitPolicy::First;
             let index = order.iter().copied().find(|&c| cols[c].reps.len() > 1 && cols[c].reps.iter().all(|r| matches!(r, Cond::Any | Cond::Other(_))));
             let mut buckets: Vec<Vec<usize>> = Vec::new();
             if let Some(c) = index {
@@ -503,12 +507,12 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
                     if !order.iter().all(|&c| cols[c].holds(rel, i, j)) {
                         continue;
                     }
-                    if hp == "FIRST" {
+                    if *hp == HitPolicy::First {
                         let what = if same_inputs(i, j) { "has exactly the same conditions as" } else { "is shadowed by" };
                         push(Severity::Error, "UNREACHABLE_RULE", vec![j, i], None, format!("Rule {} {} rule {}: with hit policy FIRST it can never fire.", j + 1, what, i + 1));
                         break;
                     }
-                    if hp == "UNIQUE" || out_ids[i] != out_ids[j] {
+                    if *hp == HitPolicy::Unique || out_ids[i] != out_ids[j] {
                         push(Severity::Error, "OVERLAPPING_RULES", vec![i, j], None, format!("Rules {} and {} can match the same input, which violates hit policy {hp}.", i + 1, j + 1));
                     }
                 }
@@ -790,7 +794,7 @@ fn lint_table(di: usize, t: &DecisionTable, v: &mut Vec<Issue>) {
         }
     }
 
-    if matches!(hp.as_str(), "FIRST" | "UNIQUE" | "ANY" | "PRIORITY") && !t.rules.is_empty() && !tests.iter().any(|r| r.iter().all(|x| *x == Cond::Any)) {
+    if matches!(hp, HitPolicy::First | HitPolicy::Unique | HitPolicy::Any | HitPolicy::Priority) && !t.rules.is_empty() && !tests.iter().any(|r| r.iter().all(|x| *x == Cond::Any)) {
         match gaps::gaps(t, 3) {
             Some(g) if g.is_empty() => {}
             Some(g) => {

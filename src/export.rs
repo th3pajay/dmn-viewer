@@ -1,4 +1,4 @@
-use crate::model::DecisionTable;
+use crate::model::{Aggregation, DecisionTable};
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,18 +99,18 @@ fn json_text(table: &DecisionTable) -> String {
             json!({ "id": r.id, "inputs": inputs, "outputs": outputs, "note": table.note(r) })
         })
         .collect();
-    let doc = json!({ "hitPolicy": table.hit_policy, "aggregation": table.aggregation, "rules": rules });
+    let doc = json!({ "hitPolicy": table.hit_policy.name(), "aggregation": table.hit_policy.aggregation().map(Aggregation::name), "rules": rules });
     serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Entry, InputClause, InputEntry, OutputClause, Rule};
+    use crate::model::{Entry, HitPolicy, InputClause, InputEntry, OutputClause, Rule};
 
     fn table() -> DecisionTable {
         DecisionTable {
-            hit_policy: "UNIQUE".into(),
+            hit_policy: HitPolicy::Unique,
             inputs: vec![InputClause { label: "Age".into(), ..Default::default() }],
             outputs: vec![OutputClause { name: "tier".into(), ..Default::default() }],
             rules: vec![Rule {

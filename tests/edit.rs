@@ -1,5 +1,5 @@
 use dmn_viewer::edit::{Column, Edit, apply};
-use dmn_viewer::model::{DecisionTable, Definitions, Language};
+use dmn_viewer::model::{Aggregation, DecisionTable, Definitions, HitPolicy, Language};
 use dmn_viewer::{lint, parse};
 use std::path::PathBuf;
 
@@ -130,12 +130,12 @@ fn rule_notes() {
 #[test]
 fn hit_policy_and_aggregation() {
     let xml = example();
-    let out = apply(&xml, &Edit::HitPolicy { decision: 0, hit_policy: "COLLECT".into(), aggregation: Some("SUM".into()) }).unwrap();
+    let out = apply(&xml, &Edit::HitPolicy { decision: 0, hit_policy: HitPolicy::Collect(Some(Aggregation::Sum)) }).unwrap();
     let t = table(&defs(&out)).clone();
-    assert_eq!((t.hit_policy.as_str(), t.aggregation.as_deref()), ("COLLECT", Some("SUM")));
-    let out = apply(&out, &Edit::HitPolicy { decision: 0, hit_policy: "FIRST".into(), aggregation: Some("SUM".into()) }).unwrap();
+    assert_eq!(t.hit_policy, HitPolicy::Collect(Some(Aggregation::Sum)));
+    let out = apply(&out, &Edit::HitPolicy { decision: 0, hit_policy: HitPolicy::First }).unwrap();
     assert_eq!(out, xml, "aggregation only applies to COLLECT");
-    let out = apply(TINY, &Edit::HitPolicy { decision: 0, hit_policy: "UNIQUE".into(), aggregation: None }).unwrap();
+    let out = apply(TINY, &Edit::HitPolicy { decision: 0, hit_policy: HitPolicy::Unique }).unwrap();
     assert_eq!(out, TINY, "the default policy is not written out");
 }
 

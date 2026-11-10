@@ -123,17 +123,26 @@ impl LineCursor<'_> {
     }
 }
 
+fn binding_of<'a>(expression: &'a str, lang: &ExpressionLanguage) -> &'a str {
+    let e = expression.trim();
+    if lang.language == Language::Juel { crate::eval::juel_body(e) } else { e }
+}
+
 fn parse_table(lines: &mut LineCursor, t: Node, file: Option<&str>) -> DecisionTable {
     let inputs = kids(t, "input")
         .map(|i| {
             let ie = child(i, "inputExpression");
+            let expression = ie.map(|e| text_child(e, "text")).unwrap_or_default();
+            let lang = ExpressionLanguage::resolve(ie.and_then(|e| opt_attr(e, "expressionLanguage")).as_deref(), file);
+            let binding = binding_of(&expression, &lang).to_string();
             InputClause {
                 id: attr(i, "id"),
                 label: attr(i, "label"),
-                expression: ie.map(|e| text_child(e, "text")).unwrap_or_default(),
+                expression,
                 type_ref: ie.and_then(|e| opt_attr(e, "typeRef")),
-                lang: ExpressionLanguage::resolve(ie.and_then(|e| opt_attr(e, "expressionLanguage")).as_deref(), file),
+                lang,
                 input_values: child(i, "inputValues").map(|v| text_child(v, "text")),
+                binding,
             }
         })
         .collect();
@@ -161,8 +170,7 @@ fn parse_table(lines: &mut LineCursor, t: Node, file: Option<&str>) -> DecisionT
 
     DecisionTable {
         id: attr(t, "id"),
-        hit_policy: opt_attr(t, "hitPolicy").unwrap_or_else(|| "UNIQUE".into()),
-        aggregation: opt_attr(t, "aggregation"),
+        hit_policy: HitPolicy::parse(opt_attr(t, "hitPolicy").as_deref(), opt_attr(t, "aggregation").as_deref()),
         inputs,
         outputs,
         annotations: kids(t, "annotation").map(|a| attr(a, "name")).collect(),

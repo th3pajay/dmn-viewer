@@ -1,4 +1,5 @@
 pub use crate::lint::Column;
+use crate::model::{Aggregation, HitPolicy};
 use crate::parse::{child, kids};
 use roxmltree::{Document, Node};
 use std::collections::HashSet;
@@ -11,7 +12,7 @@ pub enum Edit {
     Note { decision: usize, rule: usize, text: String },
     InputHeader { decision: usize, input: usize, label: String, expression: String, type_ref: Option<String>, lang: Option<String>, allowed: Option<String> },
     OutputHeader { decision: usize, output: usize, label: String, name: String, type_ref: Option<String>, allowed: Option<String> },
-    HitPolicy { decision: usize, hit_policy: String, aggregation: Option<String> },
+    HitPolicy { decision: usize, hit_policy: HitPolicy },
     FileLanguage { lang: Option<String> },
     InsertRule { decision: usize, at: usize, copy_of: Option<usize> },
     DeleteRule { decision: usize, rule: usize },
@@ -45,11 +46,11 @@ pub fn apply_unchecked(xml: &str, edit: &Edit) -> Result<String, String> {
             Ok(set_attr(x, e, "expressionLanguage", lang.as_deref()).into_iter().collect())
         })?,
         Edit::Note { decision, rule, text } => step(xml, |x, doc| note(x, doc, *decision, *rule, text))?,
-        Edit::HitPolicy { decision, hit_policy, aggregation } => step(xml, |x, doc| {
+        Edit::HitPolicy { decision, hit_policy } => step(xml, |x, doc| {
             let t = table(doc, *decision)?;
-            let keep_default = hit_policy == "UNIQUE" && t.attribute("hitPolicy").is_none();
-            let hp = if keep_default { None } else { set_attr(x, t, "hitPolicy", Some(hit_policy)) };
-            let agg = set_attr(x, t, "aggregation", aggregation.as_deref().filter(|_| hit_policy == "COLLECT"));
+            let keep_default = *hit_policy == HitPolicy::Unique && t.attribute("hitPolicy").is_none();
+            let hp = if keep_default { None } else { set_attr(x, t, "hitPolicy", Some(hit_policy.name())) };
+            let agg = set_attr(x, t, "aggregation", hit_policy.aggregation().map(Aggregation::name));
             Ok(hp.into_iter().chain(agg).collect())
         })?,
         Edit::FileLanguage { lang } => step(xml, |x, doc| Ok(set_attr(x, doc.root_element(), "expressionLanguage", lang.as_deref()).into_iter().collect()))?,

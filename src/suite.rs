@@ -59,13 +59,8 @@ pub fn value_to_json(v: &Value) -> J {
     }
 }
 
-pub fn binding_key(inp: &InputClause) -> &str {
-    let e = inp.expression.trim();
-    if inp.lang.language == Language::Juel { crate::eval::juel_body(e) } else { e }
-}
-
 pub fn bound<'a, V>(inp: &InputClause, values: &'a BTreeMap<String, V>) -> Option<&'a V> {
-    values.get(binding_key(inp)).or_else(|| values.get(&inp.label))
+    values.get(inp.binding.as_str()).or_else(|| values.get(&inp.label))
 }
 
 pub fn context(t: &DecisionTable, case: &Case) -> Context {
@@ -75,7 +70,7 @@ pub fn context(t: &DecisionTable, case: &Case) -> Context {
     }
     for inp in &t.inputs {
         let v = bound(inp, &case.inputs).map(|j| json_to_value(j, inp.type_ref.as_deref())).unwrap_or(Value::Null);
-        ctx.insert(binding_key(inp).to_string(), v);
+        ctx.insert(inp.binding.as_str().to_string(), v);
     }
     ctx
 }

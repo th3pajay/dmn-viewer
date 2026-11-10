@@ -1,6 +1,6 @@
 use crate::eval::{self, Context, Outcome, Value};
 use crate::model::*;
-use crate::suite::{self, CaseResult, Coverage, Suite, binding_key, bound, case_from_outcome, value_to_json};
+use crate::suite::{self, CaseResult, Coverage, Suite, bound, case_from_outcome, value_to_json};
 use serde_json::Value as J;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -304,7 +304,7 @@ impl TestSession {
     }
 
     fn context(&self, t: &DecisionTable) -> Context {
-        t.inputs.iter().enumerate().map(|(i, inp)| (binding_key(inp).to_string(), self.value(t, i).unwrap_or(Value::Null))).collect()
+        t.inputs.iter().enumerate().map(|(i, inp)| (inp.binding.as_str().to_string(), self.value(t, i).unwrap_or(Value::Null))).collect()
     }
 
     fn inputs_json(&self, t: &DecisionTable) -> BTreeMap<String, J> {
@@ -313,7 +313,7 @@ impl TestSession {
             .enumerate()
             .filter_map(|(i, inp)| {
                 let v = self.value(t, i)?;
-                (v != Value::Null).then(|| (binding_key(inp).to_string(), value_to_json(&v)))
+                (v != Value::Null).then(|| (inp.binding.as_str().to_string(), value_to_json(&v)))
             })
             .collect()
     }

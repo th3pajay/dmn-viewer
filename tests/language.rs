@@ -35,3 +35,22 @@ fn file_default_javascript_is_linted_as_javascript() {
     let js = issues.iter().find(|i| i.code == "JAVASCRIPT").expect("JAVASCRIPT issue");
     assert!(js.rules.len() > 1, "{:?}", js.rules);
 }
+
+#[test]
+fn names_and_descriptions() {
+    let js = ExpressionLanguage::resolve(Some("javascript"), None);
+    assert_eq!((js.short_name().as_ref(), js.long_name().as_ref(), js.describe().as_str()), ("JS", "JavaScript", "JavaScript"));
+    let juel = ExpressionLanguage::resolve(None, Some("juel"));
+    assert_eq!(juel.describe(), "JUEL (default)");
+    assert_eq!(ExpressionLanguage::resolve(None, None).describe(), "FEEL (default)");
+    assert_eq!(ExpressionLanguage::resolve(Some("groovy"), None).long_name(), "GROOVY");
+}
+
+#[test]
+fn the_parser_resolves_the_binding_key_once() {
+    let xml = example().replacen("<text>Region</text>", "<text>${Region}</text>", 1);
+    let defs = parse::parse(&xml).unwrap();
+    let DecisionLogic::Table(t) = &defs.decisions[0].logic else { panic!() };
+    assert_eq!(t.inputs[0].binding, "Region");
+    assert_eq!(t.inputs[1].binding, "Weight");
+}

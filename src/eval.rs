@@ -1041,14 +1041,17 @@ fn eval_input(inp: &InputClause, vars: &Context) -> Result<Value, String> {
     Ok(v.coerce(inp.type_ref.as_deref()).unwrap_or(Value::Null))
 }
 
-fn priority_key(t: &DecisionTable, row: &[Value]) -> Vec<usize> {
-    t.outputs
+fn priority_lists(t: &DecisionTable) -> Vec<Vec<String>> {
+    t.outputs.iter().map(|o| o.output_values.as_deref().map(split_top).unwrap_or_default().into_iter().map(|s| s.trim().to_string()).collect()).collect()
+}
+
+fn priority_key(lists: &[Vec<String>], row: &[Value]) -> Vec<usize> {
+    lists
         .iter()
         .enumerate()
-        .map(|(i, o)| {
-            let list: Vec<String> = o.output_values.as_deref().map(split_top).unwrap_or_default();
+        .map(|(i, list)| {
             let shown = row.get(i).map(|v| v.display()).unwrap_or_default();
-            list.iter().position(|x| x.trim() == shown).unwrap_or(usize::MAX)
+            list.iter().position(|x| *x == shown).unwrap_or(usize::MAX)
         })
         .collect()
 }
@@ -1111,18 +1114,19 @@ pub fn evaluate(t: &DecisionTable, vars: &Context) -> Outcome {
         return o;
     }
 
-    let hp = t.hit_policy.to_ascii_uppercase();
-    let to_eval: Vec<usize> = match hp.as_str() {
-        "FIRST" => o.matched.iter().take(1).copied().collect(),
-        "UNIQUE" if o.matched.len() > 1 => {
-            o.error = Some(format!("Hit policy UNIQUE violated: rules {} all matched", crate::lint::rules_label(&o.matched)));
-            return o;
-        }
-        _ => o.matched.clone(),
-    };
-
-    let mut rows = Vec::new();
-    for &ri in &to_eval {
+    if let Some(e) = t.hit_policy.unsupported() {
+        o.error = Some(e);
+        return o;
+    }
+    let hp = &t.hit_policy;
+    if *hp == HitPolicy::Unique && o.matched.len() > 1 {
+        o.error = Some(format!("Hit policy UNIQUE violated: rules {} all matched", crate::lint::rules_label(&o.matched)));
+        return o;
+    }
+    let take = if *hp == HitPolicy::First { o.matched.len().min(1) } else { o.matched.len() };
+    let mut rows = Vec::with_capacity(take);
+    for i in 0..take {
+        let ri = o.matched[i];
         match rule_outputs(t, ri, vars) {
             Ok(row) => rows.push((ri, row)),
             Err(err) => {
@@ -1132,35 +1136,64 @@ pub fn evaluate(t: &DecisionTable, vars: &Context) -> Outcome {
         }
     }
 
-    match hp.as_str() {
-        "ANY" if rows.windows(2).any(|w| w[0].1 != w[1].1) => {
+    match hp {
+        HitPolicy::Any if rows.windows(2).any(|w| w[0].1 != w[1].1) => {
             o.error = Some(format!("Hit policy ANY violated: rules {} matched with different outputs", crate::lint::rules_label(&o.matched)));
             return o;
         }
-        "ANY" => rows.truncate(1),
-        "PRIORITY" => {
-            rows.sort_by_cached_key(|(_, r)| priority_key(t, r));
+        HitPolicy::Any => rows.truncate(1),
+        HitPolicy::Priority if rows.len() > 1 => {
+            let lists = priority_lists(t);
+            let best = (0..rows.len()).min_by_key(|&i| priority_key(&lists, &rows[i].1)).unwrap_or(0);
+            rows.swap(0, best);
             rows.truncate(1);
         }
-        "OUTPUT ORDER" => rows.sort_by_cached_key(|(_, r)| priority_key(t, r)),
+        HitPolicy::OutputOrder if rows.len() > 1 => {
+            let lists = priority_lists(t);
+            rows.sort_by_cached_key(|(_, r)| priority_key(&lists, r));
+        }
         _ => {}
     }
     o.fired = rows.iter().map(|(ri, _)| *ri).collect();
     o.rows = rows.into_iter().map(|(_, r)| r).collect();
 
-    if hp == "COLLECT"
-        && let Some(agg) = t.aggregation.as_deref().map(|a| a.to_ascii_uppercase())
-    {
-        let nums: Vec<f64> = o.rows.iter().filter_map(|r| r.first()).filter(|v| **v != Value::Null).map(|v| v.js_number()).collect();
-        o.aggregate = Some(match agg.as_str() {
-            "COUNT" => Value::Num(nums.len() as f64),
-            "SUM" => Value::Num(nums.iter().sum()),
-            "MIN" => nums.iter().copied().reduce(f64::min).map(Value::Num).unwrap_or(Value::Null),
-            "MAX" => nums.iter().copied().reduce(f64::max).map(Value::Num).unwrap_or(Value::Null),
-            _ => Value::Null,
+    if let Some(agg) = hp.aggregation() {
+        let nums = o.rows.iter().filter_map(|r| r.first()).filter(|v| **v != Value::Null).map(Value::js_number);
+        o.aggregate = Some(match agg {
+            Aggregation::Count => Value::Num(nums.count() as f64),
+            Aggregation::Sum => Value::Num(nums.sum()),
+            Aggregation::Min => nums.reduce(f64::min).map_or(Value::Null, Value::Num),
+            Aggregation::Max => nums.reduce(f64::max).map_or(Value::Null, Value::Num),
+            Aggregation::Unknown(_) => Value::Null,
         });
     }
     o
+}
+
+pub fn blockers(t: &DecisionTable, rule: usize) -> Option<Vec<usize>> {
+    if t.hit_policy.unsupported().is_some() || rule >= t.rules.len() {
+        return None;
+    }
+    let others = (0..t.rules.len()).filter(|&r| r != rule);
+    let ctx = Context::new();
+    let row = |r: usize| rule_outputs(t, r, &ctx).ok();
+    Some(match &t.hit_policy {
+        HitPolicy::First => (0..rule).collect(),
+        HitPolicy::Unique => others.collect(),
+        HitPolicy::Any => match row(rule) {
+            Some(mine) => others.filter(|&r| r < rule || row(r).as_ref() != Some(&mine)).collect(),
+            None => others.collect(),
+        },
+        HitPolicy::Priority => {
+            let lists = priority_lists(t);
+            let key = |r: usize| row(r).map(|v| priority_key(&lists, &v));
+            match key(rule) {
+                Some(mine) => others.filter(|&r| key(r).is_none_or(|k| k < mine || (k == mine && r < rule))).collect(),
+                None => others.collect(),
+            }
+        }
+        _ => Vec::new(),
+    })
 }
 
 #[cfg(test)]

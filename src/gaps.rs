@@ -420,12 +420,7 @@ pub fn witness(t: &DecisionTable, rule: usize) -> Option<Vec<Option<Value>>> {
         }
         cands.push(list);
     }
-    let hp = t.hit_policy.to_ascii_uppercase();
-    let avoid: Vec<usize> = match hp.as_str() {
-        "FIRST" => (0..rule).collect(),
-        "UNIQUE" | "ANY" | "PRIORITY" => (0..n).filter(|&r| r != rule).collect(),
-        _ => vec![],
-    };
+    let avoid = crate::eval::blockers(t, rule)?;
     let mut live = vec![0u64; w];
     for &r in avoid.iter().chain([&rule]) {
         live[r / 64] |= 1 << (r % 64);

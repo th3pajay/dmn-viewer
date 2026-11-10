@@ -152,12 +152,7 @@ pub fn fixes(defs: &Definitions, is: &Issue) -> Vec<Fix> {
         ("UNREACHABLE_RULE", None, [j, i]) => unreachable(d, t, *j, *i),
         ("DUPLICATE_RULE", None, [i, j]) => vec![Fix {
             label: format!("Delete rule {}", j + 1),
-            hint: Some(format!(
-                "Rule {} is an exact copy of rule {}. With hit policy {} both fire today, so a COLLECT result (a count or a sum) changes.",
-                j + 1,
-                i + 1,
-                t.hit_policy.to_ascii_uppercase()
-            )),
+            hint: Some(format!("Rule {} is an exact copy of rule {}. With hit policy {} both fire today, so a COLLECT result (a count or a sum) changes.", j + 1, i + 1, t.hit_policy.name())),
             destructive: true,
             edits: vec![Edit::DeleteRule { decision: d, rule: *j }],
         }],
@@ -380,7 +375,7 @@ pub fn describe(defs: &Definitions, e: &Edit) -> Vec<Change> {
                 Column::Output(o) => r.and_then(|r| r.outputs.get(*o)).map(|x| &x.lang),
             };
             let new = ExpressionLanguage::resolve(lang.as_deref(), defs.expression_language.as_deref());
-            vec![ch(format!("Rule {} · {} · language", rule + 1, col_title(t, *col)), &old.map(language_name).unwrap_or_default(), &language_name(&new))]
+            vec![ch(format!("Rule {} · {} · language", rule + 1, col_title(t, *col)), &old.map(ExpressionLanguage::describe).unwrap_or_default(), &new.describe())]
         }
         Edit::InputHeader { decision, input, lang, allowed, .. } => {
             let Some(inp) = table(*decision).and_then(|t| t.inputs.get(*input)) else { return vec![] };
@@ -388,7 +383,7 @@ pub fn describe(defs: &Definitions, e: &Edit) -> Vec<Change> {
             let explicit = inp.lang.declared.as_deref().filter(|_| inp.lang.is_explicit());
             if explicit != lang.as_deref() {
                 let new = ExpressionLanguage::resolve(lang.as_deref(), defs.expression_language.as_deref());
-                out.push(ch(format!("Input \"{}\" · language", inp.title()), &language_name(&inp.lang), &language_name(&new)));
+                out.push(ch(format!("Input \"{}\" · language", inp.title()), &inp.lang.describe(), &new.describe()));
             }
             if inp.input_values.as_deref() != allowed.as_deref() {
                 out.push(ch(format!("Input \"{}\" · allowed values", inp.title()), &any(inp.input_values.as_deref()), &any(allowed.as_deref())));
@@ -415,16 +410,6 @@ pub fn describe(defs: &Definitions, e: &Edit) -> Vec<Change> {
         Edit::RenameDuplicateId { id } => vec![ch("Later elements with this id".into(), id, &format!("{id}_2, {id}_3, …"))],
         other => vec![ch("Edit".into(), "", &format!("{other:?}"))],
     }
-}
-
-fn language_name(l: &ExpressionLanguage) -> String {
-    let name = match l.language {
-        Language::Feel => "FEEL",
-        Language::Js => "JavaScript",
-        Language::Juel => "JUEL",
-        Language::Unsupported => return l.short_name(),
-    };
-    if l.is_explicit() { name.to_string() } else { format!("{name} (default)") }
 }
 
 pub fn test_effect(before: &Definitions, after: &Definitions, decision: usize, s: &Suite) -> Option<TestEffect> {

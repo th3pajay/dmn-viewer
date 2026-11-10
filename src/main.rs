@@ -407,9 +407,7 @@ impl HeaderForm {
     }
 }
 
-const HIT_POLICIES: [&str; 7] = ["UNIQUE", "FIRST", "PRIORITY", "ANY", "COLLECT", "RULE ORDER", "OUTPUT ORDER"];
 const TYPES: [&str; 7] = ["string", "integer", "long", "double", "boolean", "date", "number"];
-const CELL_LANGS: [(&str, Option<&str>); 4] = [("Default (file or FEEL)", None), ("FEEL", Some("feel")), ("JavaScript", Some("javascript")), ("JUEL", Some("juel"))];
 
 fn rule_menu(ui: &mut egui::Ui, decision: usize, ri: usize, nrules: usize, acts: &mut Vec<Act>) {
     if ui.button("Test this rule").on_hover_text("Fill the test inputs with values that make this rule fire, then open the Test tab").clicked() {
@@ -538,17 +536,10 @@ struct App {
     shell: menu::Shell,
 }
 
-fn lang_long(short: &str) -> &str {
-    match short {
-        "JS" => "JavaScript",
-        other => other,
-    }
-}
-
-fn lang_colors(t: &Theme, short: &str) -> (Color32, Color32) {
-    match short {
-        "JS" => (t.warn.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.warn_text),
-        "JUEL" => (t.info.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.info_text),
+fn lang_colors(t: &Theme, l: Language) -> (Color32, Color32) {
+    match l {
+        Language::Js => (t.warn.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.warn_text),
+        Language::Juel => (t.info.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.info_text),
         _ => (t.chip, t.muted),
     }
 }
@@ -559,13 +550,12 @@ fn lang_describe(lang: &ExpressionLanguage) -> String {
         LanguageSource::FileDefault => "file default",
         LanguageSource::Default => "default, not set",
     };
-    format!("{} ({source})", lang_long(&lang.short_name()))
+    format!("{} ({source})", lang.long_name())
 }
 
-fn paint_lang_tag(ui: &mut egui::Ui, t: &Theme, short: &str, explicit: bool, mask: Color32) {
-    let (bg, fg) = lang_colors(t, short);
-    let (bg, fg) = if explicit { (bg, fg) } else { (t.chip.gamma_multiply(0.7), t.faint) };
-    let galley = ui.painter().layout_no_wrap(short.to_string(), FontId::new(9.5, bold_family()), fg);
+fn paint_lang_tag(ui: &mut egui::Ui, t: &Theme, lang: &ExpressionLanguage, mask: Color32) {
+    let (bg, fg) = if lang.is_explicit() { lang_colors(t, lang.language) } else { (t.chip.gamma_multiply(0.7), t.faint) };
+    let galley = ui.painter().layout_no_wrap(lang.short_name().into_owned(), FontId::new(9.5, bold_family()), fg);
     let rect = ui.max_rect();
     let size = vec2(galley.size().x + 10.0, 16.0);
     let tag = egui::Rect::from_min_size(egui::pos2(rect.right() - size.x - 8.0, rect.center().y - size.y / 2.0), size);
@@ -907,8 +897,8 @@ impl App {
                         ui.label(RichText::new("Language").color(t.muted));
                         let shown = if lang.is_empty() { "default".to_string() } else { lang.clone() };
                         egui::ComboBox::from_id_salt("header_lang").selected_text(shown).show_ui(ui, |ui| {
-                            for (label, v) in [("default", ""), ("FEEL", "feel"), ("JavaScript", "javascript"), ("JUEL", "juel")] {
-                                ui.selectable_value(lang, v.to_string(), label);
+                            for (label, v) in Language::CHOICES {
+                                ui.selectable_value(lang, v.unwrap_or_default().to_string(), label);
                             }
                         });
                         ui.end_row();
@@ -1126,28 +1116,33 @@ impl App {
                 ui.label(bold(if d.name.is_empty() { &d.id } else { &d.name }, 14.0).color(t.text));
                 if let DecisionLogic::Table(tb) = &d.logic {
                     if l.editable() && !fixing {
-                        let current = tb.hit_policy.to_ascii_uppercase();
-                        let mut hp = current.clone();
-                        let mut agg = tb.aggregation.as_deref().map(str::to_ascii_uppercase);
-                        let before = agg.clone();
-                        egui::ComboBox::from_id_salt("hit_policy").selected_text(&hp).width(120.0).show_ui(ui, |ui| {
-                            for p in HIT_POLICIES {
-                                ui.selectable_value(&mut hp, p.to_string(), p);
+                        let current = &tb.hit_policy;
+                        let mut picked_hp = None;
+                        egui::ComboBox::from_id_salt("hit_policy").selected_text(current.name()).width(120.0).show_ui(ui, |ui| {
+                            for p in HitPolicy::ALL {
+                                if ui.selectable_label(current.same_kind(&p), p.name()).clicked() && !current.same_kind(&p) {
+                                    picked_hp = Some(p);
+                                }
                             }
                         });
-                        if hp == "COLLECT" {
-                            egui::ComboBox::from_id_salt("aggregation").selected_text(agg.clone().unwrap_or_else(|| "list".into())).width(70.0).show_ui(ui, |ui| {
-                                ui.selectable_value(&mut agg, None, "list");
-                                for a in ["SUM", "MIN", "MAX", "COUNT"] {
-                                    ui.selectable_value(&mut agg, Some(a.to_string()), a);
+                        if let HitPolicy::Collect(agg) = current {
+                            egui::ComboBox::from_id_salt("aggregation").selected_text(agg.as_ref().map_or("list", Aggregation::name)).width(70.0).show_ui(ui, |ui| {
+                                if ui.selectable_label(agg.is_none(), "list").clicked() && agg.is_some() {
+                                    picked_hp = Some(HitPolicy::Collect(None));
+                                }
+                                for a in Aggregation::ALL {
+                                    let on = agg.as_ref() == Some(&a);
+                                    if ui.selectable_label(on, a.name()).clicked() && !on {
+                                        picked_hp = Some(HitPolicy::Collect(Some(a)));
+                                    }
                                 }
                             });
                         }
-                        if hp != current || agg != before {
-                            acts.push(Act::Edit(Edit::HitPolicy { decision, hit_policy: hp, aggregation: agg }));
+                        if let Some(hit_policy) = picked_hp {
+                            acts.push(Act::Edit(Edit::HitPolicy { decision, hit_policy }));
                         }
                         let file_lang = l.defs().expression_language.clone();
-                        let shown = CELL_LANGS
+                        let shown = Language::CHOICES
                             .iter()
                             .find(|(_, v)| v.map(str::to_string) == file_lang.as_ref().map(|s| s.to_ascii_lowercase()))
                             .map_or_else(|| file_lang.clone().unwrap_or_default(), |(n, _)| n.to_string());
@@ -1158,7 +1153,7 @@ impl App {
                             .width(130.0)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut picked, None, "FEEL (default)");
-                                for (name, v) in CELL_LANGS.iter().skip(1) {
+                                for (name, v) in Language::CHOICES.iter().skip(1) {
                                     ui.selectable_value(&mut picked, v.map(str::to_string), *name);
                                 }
                             })
@@ -1168,7 +1163,7 @@ impl App {
                             acts.push(Act::Edit(Edit::FileLanguage { lang: picked }));
                         }
                     } else {
-                        pill(ui, &tb.hit_policy, t.chip, t.muted).on_hover_text("Hit policy");
+                        pill(ui, tb.hit_policy.to_string(), t.chip, t.muted).on_hover_text("Hit policy");
                     }
                     pill(ui, format!("{} in · {} out", tb.inputs.len(), tb.outputs.len()), t.chip, t.muted);
                 }
@@ -1397,10 +1392,10 @@ impl App {
                                         ui.label(RichText::new(ty.as_str()).size(12.0).color(t.muted));
                                     });
                                     fixed(ui, W[3], &mut |ui| {
-                                        let short = lang.short_name();
-                                        let (bg, fg) = if lang.is_explicit() { lang_colors(&t, &short) } else { (t.chip, t.faint) };
-                                        pill(ui, if lang.is_explicit() { lang_long(&short).to_string() } else { format!("{} (default)", lang_long(&short)) }, bg, fg)
-                                            .on_hover_text(lang_describe(lang));
+                                        let (bg, fg) = if lang.is_explicit() { lang_colors(&t, lang.language) } else { (t.chip, t.faint) };
+                                        pill(ui, lang.describe(), bg, fg).on_hover_ui(|ui| {
+                                            ui.label(lang_describe(lang));
+                                        });
                                     });
                                     let w = (ui.available_width() - 44.0).max(120.0);
                                     ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
@@ -1489,7 +1484,7 @@ impl App {
                         .header(76.0, |mut h| {
                             h.col(|ui| {
                                 paint_cell(ui, true);
-                                ui.label(bold(&tb.hit_policy[..1.min(tb.hit_policy.len())], 13.0).color(t.muted)).on_hover_text(format!("Hit policy {}", tb.hit_policy));
+                                ui.label(bold(&tb.hit_policy.name()[..1.min(tb.hit_policy.name().len())], 13.0).color(t.muted)).on_hover_text(format!("Hit policy {}", tb.hit_policy));
                             });
                             for (ci, inp) in tb.inputs.iter().enumerate() {
                                 h.col(|ui| {
@@ -1500,7 +1495,6 @@ impl App {
                                         Some(i) => ("INPUT", t.sev_text(i.severity)),
                                         None => ("INPUT", t.in_label),
                                     };
-                                    let short = inp.lang.short_name();
                                     let resp = ui
                                         .vertical(|ui| {
                                             ui.add_space(8.0);
@@ -1511,9 +1505,9 @@ impl App {
                                                 ui.label(RichText::new(inp.type_ref.as_deref().unwrap_or("-")).size(11.0).color(t.muted));
                                                 ui.label(RichText::new("·").size(11.0).color(t.faint));
                                                 if inp.lang.is_explicit() {
-                                                    ui.label(bold(lang_long(&short), 11.0).color(lang_colors(&t, &short).1));
+                                                    ui.label(bold(inp.lang.long_name(), 11.0).color(lang_colors(&t, inp.lang.language).1));
                                                 } else {
-                                                    ui.label(RichText::new(format!("{} (default)", lang_long(&short))).size(11.0).color(t.faint));
+                                                    ui.label(RichText::new(inp.lang.describe()).size(11.0).color(t.faint));
                                                 }
                                             });
                                         })
@@ -1538,7 +1532,6 @@ impl App {
                             for (oi, out) in tb.outputs.iter().enumerate() {
                                 h.col(|ui| {
                                     paint_cell(ui, true);
-                                    let langs: std::collections::BTreeSet<String> = tb.rules.iter().filter_map(|r| r.outputs.get(oi)).filter(|e| !e.is_any()).map(|e| e.lang.short_name()).collect();
                                     let resp = ui
                                         .vertical(|ui| {
                                             ui.add_space(8.0);
@@ -1548,13 +1541,16 @@ impl App {
                                         })
                                         .response
                                         .interact(Sense::click())
-                                        .on_hover_text(format!(
-                                            "{}\nname: {}\ntype: {}\nlanguages used in this column: {}\n(the language is set per cell, not per column)",
-                                            out.title(),
-                                            out.name,
-                                            out.type_ref.as_deref().unwrap_or("-"),
-                                            if langs.is_empty() { "-".to_string() } else { langs.into_iter().map(|s| lang_long(&s).to_string()).collect::<Vec<_>>().join(", ") }
-                                        ));
+                                        .on_hover_ui(|ui| {
+                                            let langs: std::collections::BTreeSet<_> = tb.rules.iter().filter_map(|r| r.outputs.get(oi)).filter(|e| !e.is_any()).map(|e| e.lang.long_name()).collect();
+                                            ui.label(format!(
+                                                "{}\nname: {}\ntype: {}\nlanguages used in this column: {}\n(the language is set per cell, not per column)",
+                                                out.title(),
+                                                out.name,
+                                                out.type_ref.as_deref().unwrap_or("-"),
+                                                if langs.is_empty() { "-".to_string() } else { langs.into_iter().collect::<Vec<_>>().join(", ") }
+                                            ));
+                                        });
                                     if editable {
                                         if resp.double_clicked() {
                                             acts.push(Act::EditHeader(Col::Output(oi)));
@@ -1627,7 +1623,7 @@ impl App {
                                             && (lang.is_explicit() || show_langs)
                                         {
                                             let mask = if is_sel { t.sel_row } else { t.surface };
-                                            paint_lang_tag(ui, &t, &lang.short_name(), lang.is_explicit(), mask);
+                                            paint_lang_tag(ui, &t, lang, mask);
                                         }
                                     });
                                     if editable {
@@ -1640,7 +1636,7 @@ impl App {
                                                 ui.close();
                                             }
                                             ui.menu_button("Expression language", |ui| {
-                                                for (label, lang) in CELL_LANGS {
+                                                for (label, lang) in Language::CHOICES {
                                                     if ui.button(label).clicked() {
                                                         acts.push(Act::Edit(Edit::CellLanguage { decision, rule: ri, col: c, lang: lang.map(str::to_string) }));
                                                         ui.close();
@@ -2332,7 +2328,7 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
             ui.set_min_height(ui.available_height());
             ui.horizontal(|ui| {
                 ui.label(bold("Result", 15.0).color(t.text));
-                pill(ui, &tb.hit_policy, t.chip, t.muted);
+                pill(ui, tb.hit_policy.to_string(), t.chip, t.muted);
                 if outcome.error.is_none() {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for &r in &outcome.fired {
@@ -2417,7 +2413,7 @@ fn test_view(ui: &mut egui::Ui, ws: &mut Workspace, selected: Option<usize>, tes
                             let actual = if ri == 0 { outcome.output(oi) } else { outcome.rows[ri].get(oi).cloned().unwrap_or(Value::Null) };
                             let want = verdict.filter(|_| ri == 0).map(|(e, _)| &e.values[oi]);
                             let name = match (&outcome.aggregate, nrows) {
-                                (Some(_), _) if oi == 0 => format!("{} ({})", out.title(), tb.aggregation.clone().unwrap_or_default()),
+                                (Some(_), _) if oi == 0 => format!("{} ({})", out.title(), tb.hit_policy.aggregation().map_or("", Aggregation::name)),
                                 (None, n) if n > 1 => format!("{} #{}", out.title(), ri + 1),
                                 _ => out.title().to_string(),
                             };
