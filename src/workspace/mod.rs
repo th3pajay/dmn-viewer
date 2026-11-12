@@ -311,6 +311,10 @@ impl Workspace {
         self.selected = if self.selected == Some(rule) { None } else { Some(rule) };
     }
 
+    pub fn select(&mut self, rule: usize) {
+        self.selected = Some(rule);
+    }
+
     pub fn deselect(&mut self) {
         self.selected = None;
     }

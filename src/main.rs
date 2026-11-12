@@ -518,11 +518,22 @@ struct Review {
 const REVIEW_HUNKS: usize = 300;
 const REVIEW_LINES: usize = 40;
 
+const DETAIL_DELAY: f64 = 0.32;
+
+struct Derived {
+    rule: Vec<Option<Severity>>,
+    cell: Vec<Option<Severity>>,
+    notes: Vec<String>,
+}
+
 struct App {
     loaded: Option<Workspace>,
     error: Option<String>,
     filter: String,
     visible_cache: Option<(String, usize, u64, Arc<Vec<usize>>)>,
+    derived: Option<(usize, u64, Arc<Derived>)>,
+    detail_after: f64,
+    detail_open: bool,
     sev_filter: Option<Severity>,
     show_langs: bool,
     theme: Theme,
@@ -616,6 +627,9 @@ impl App {
             error: None,
             filter: String::new(),
             visible_cache: None,
+            derived: None,
+            detail_after: 0.0,
+            detail_open: false,
             sev_filter: None,
             show_langs: false,
             theme,
@@ -936,7 +950,12 @@ impl App {
             match a {
                 Act::Select(r) => {
                     if let Some(l) = self.loaded.as_mut() {
-                        l.toggle_select(r);
+                        let opening = l.selected().is_none();
+                        l.select(r);
+                        if opening {
+                            self.detail_after = ctx.input(|i| i.time) + DETAIL_DELAY;
+                            ctx.request_repaint_after(std::time::Duration::from_secs_f64(DETAIL_DELAY));
+                        }
                     }
                 }
                 Act::Jump(r) => {
@@ -1267,31 +1286,40 @@ impl App {
         }
 
         let (n_in, n_out) = (tb.inputs.len(), tb.outputs.len());
-        let mut rule_sevs: Vec<Option<Severity>> = vec![None; nrules];
-        let mut cell_sevs: Vec<Option<Severity>> = vec![None; nrules * (n_in + n_out)];
-        for i in issues.iter().filter(|i| row_specific(i, nrules)) {
-            let slot = i.column.and_then(|c| match c {
-                Col::Input(k) if k < n_in => Some(k),
-                Col::Output(k) if k < n_out => Some(n_in + k),
-                _ => None,
-            });
-            for &ri in i.rules.iter().filter(|&&ri| ri < nrules) {
-                rule_sevs[ri] = Some(rule_sevs[ri].map_or(i.severity, |old| old.min(i.severity)));
-                if let Some(s) = slot {
-                    let c = &mut cell_sevs[ri * (n_in + n_out) + s];
-                    *c = Some(c.map_or(i.severity, |old| old.min(i.severity)));
+        let revision = l.revision();
+        let derived = match &self.derived {
+            Some((d, rev, s)) if *d == decision && *rev == revision => s.clone(),
+            _ => {
+                let mut rule = vec![None; nrules];
+                let mut cell = vec![None; nrules * (n_in + n_out)];
+                for i in issues.iter().filter(|i| row_specific(i, nrules)) {
+                    let slot = i.column.and_then(|c| match c {
+                        Col::Input(k) if k < n_in => Some(k),
+                        Col::Output(k) if k < n_out => Some(n_in + k),
+                        _ => None,
+                    });
+                    for &ri in i.rules.iter().filter(|&&ri| ri < nrules) {
+                        rule[ri] = Some(rule[ri].map_or(i.severity, |old: Severity| old.min(i.severity)));
+                        if let Some(s) = slot {
+                            let c = &mut cell[ri * (n_in + n_out) + s];
+                            *c = Some(c.map_or(i.severity, |old: Severity| old.min(i.severity)));
+                        }
+                    }
                 }
+                let notes = tb.rules.iter().map(|r| one_line(&r.summary())).collect();
+                let s = Arc::new(Derived { rule, cell, notes });
+                self.derived = Some((decision, revision, s.clone()));
+                s
             }
-        }
-        let rule_sev = |ri: usize| rule_sevs[ri];
+        };
+        let rule_sev = |ri: usize| derived.rule[ri];
         let cell_sev = |ri: usize, c: Col| match c {
-            Col::Input(k) if k < n_in => cell_sevs[ri * (n_in + n_out) + k],
-            Col::Output(k) if k < n_out => cell_sevs[ri * (n_in + n_out) + n_in + k],
+            Col::Input(k) if k < n_in => derived.cell[ri * (n_in + n_out) + k],
+            Col::Output(k) if k < n_out => derived.cell[ri * (n_in + n_out) + n_in + k],
             _ => None,
         };
         let col_issue = |c: Col| issues.iter().filter(|i| i.column == Some(c) && i.rules.is_empty() && i.severity != Severity::Info).min_by_key(|i| i.severity).copied();
 
-        let revision = l.revision();
         let visible = match &self.visible_cache {
             Some((f, d, rev, v)) if *d == decision && *rev == revision && *f == self.filter => v.clone(),
             _ => {
@@ -1315,8 +1343,12 @@ impl App {
         let selected = l.selected();
         let show_langs = self.show_langs;
         let editable = l.editable() && !self.is_fixing();
+        let show_detail = selected.is_some() && (editing.is_some() || ui.input(|i| i.time) >= self.detail_after);
+        let reveal_selected = show_detail && !self.detail_open;
+        self.detail_open = show_detail;
+        let keep_in_view = reveal_selected.then(|| selected.and_then(|ri| visible.iter().position(|&x| x == ri))).flatten();
 
-        if let Some(r) = selected.and_then(|ri| tb.rules.get(ri).map(|r| (ri, r))) {
+        if let Some(r) = selected.filter(|_| show_detail).and_then(|ri| tb.rules.get(ri).map(|r| (ri, r))) {
             let (ri, rule) = r;
             egui::Panel::bottom("rule_detail").resizable(true).default_size(240.0).frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 20, right: 16, top: 10, bottom: 14 })).show(
                 ui,
@@ -1343,15 +1375,15 @@ impl App {
                             ui.label(RichText::new(summary.trim()).size(12.5).italics().color(t.muted));
                         }
                         ui.add_space(4.0);
-                        let mut rows: Vec<(String, &str, String, &ExpressionLanguage, &str)> = Vec::new();
+                        let mut rows: Vec<(&str, &str, &str, &ExpressionLanguage, &str)> = Vec::with_capacity(n_in + n_out);
                         for (ci, inp) in tb.inputs.iter().enumerate() {
                             if let Some(e) = rule.inputs.get(ci).filter(|e| !e.is_any()) {
-                                rows.push((inp.title().to_string(), "input", inp.type_ref.clone().unwrap_or_else(|| "-".into()), &e.lang, e.text.trim()));
+                                rows.push((inp.title(), "input", inp.type_ref.as_deref().unwrap_or("-"), &e.lang, e.text.trim()));
                             }
                         }
                         for (oi, out) in tb.outputs.iter().enumerate() {
                             if let Some(e) = rule.outputs.get(oi).filter(|e| !e.is_any()) {
-                                rows.push((out.title().to_string(), "output", out.type_ref.clone().unwrap_or_else(|| "-".into()), &e.lang, e.text.trim()));
+                                rows.push((out.title(), "output", out.type_ref.as_deref().unwrap_or("-"), &e.lang, e.text.trim()));
                             }
                         }
                         let hidden = tb.inputs.len() + tb.outputs.len() - rows.len();
@@ -1374,13 +1406,13 @@ impl App {
                             for (name, kind, ty, lang, text) in &rows {
                                 ui.horizontal_top(|ui| {
                                     fixed(ui, W[0], &mut |ui| {
-                                        ui.add(egui::Label::new(bold(name.as_str(), 12.5).color(t.text)).wrap_mode(TextWrapMode::Truncate));
+                                        ui.add(egui::Label::new(bold(*name, 12.5).color(t.text)).wrap_mode(TextWrapMode::Truncate));
                                     });
                                     fixed(ui, W[1], &mut |ui| {
                                         ui.label(RichText::new(*kind).size(12.0).color(if *kind == "input" { t.in_label } else { t.out_label }));
                                     });
                                     fixed(ui, W[2], &mut |ui| {
-                                        ui.label(RichText::new(ty.as_str()).size(12.0).color(t.muted));
+                                        ui.label(RichText::new(*ty).size(12.0).color(t.muted));
                                     });
                                     fixed(ui, W[3], &mut |ui| {
                                         let (bg, fg) = if lang.is_explicit() { lang_colors(&t, lang.language) } else { (t.chip, t.faint) };
@@ -1449,6 +1481,11 @@ impl App {
             Frame::new().fill(t.surface).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius { nw: 10, ne: 0, sw: 0, se: 0 }).show(ui, |ui| {
                 egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
+                    let drag_id = egui::Id::new("rule_drag");
+                    let slot_id = egui::Id::new("rule_drop_slot");
+                    let dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+                    let drop_slot: Option<usize> = dragging.and_then(|_| ui.data(|d| d.get_temp(slot_id)));
+                    let can_drag = editable && editing.is_none() && visible.len() == nrules;
                     let mut builder = TableBuilder::new(ui)
                         .striped(false)
                         .resizable(true)
@@ -1464,6 +1501,8 @@ impl App {
                     builder = builder.column(Column::remainder().at_least(220.0).clip(true));
                     if let Some(row) = scroll_target {
                         builder = builder.scroll_to_row(row, Some(Align::Center));
+                    } else if let Some(row) = keep_in_view {
+                        builder = builder.scroll_to_row(row, None);
                     }
                     let paint_cell = |ui: &mut egui::Ui, header: bool| {
                         ui.style_mut().interaction.selectable_labels = false;
@@ -1565,15 +1604,40 @@ impl App {
                                 let r = &tb.rules[ri];
                                 let is_sel = selected == Some(ri);
                                 let is_fired = fired.contains(&ri);
+                                let is_drag_src = dragging == Some(ri);
                                 let base = |ui: &mut egui::Ui| {
                                     let rect = ui.max_rect();
                                     if is_sel {
                                         ui.painter().rect_filled(rect, 0.0, t.sel_row);
                                     }
+                                    if is_drag_src {
+                                        ui.painter().rect_filled(rect, 0.0, t.accent_soft);
+                                    }
                                     paint_cell(ui, false);
+                                    if let Some(slot) = drop_slot {
+                                        let y = if slot == ri { Some(rect.top()) } else if slot == ri + 1 && ri + 1 == nrules { Some(rect.bottom()) } else { None };
+                                        if let Some(y) = y {
+                                            ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, t.accent));
+                                        }
+                                    }
                                 };
                                 row.col(|ui| {
                                     base(ui);
+                                    if can_drag {
+                                        let rect = ui.max_rect();
+                                        let grip = egui::Rect::from_min_size(rect.min, vec2(20.0, rect.height()));
+                                        let handle = ui.interact(grip, egui::Id::new(("rule_grip", ri)), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+                                        if handle.drag_started() {
+                                            ui.data_mut(|d| d.insert_temp(drag_id, ri));
+                                        }
+                                    }
+                                    if let (Some(_), Some(p)) = (dragging, ui.input(|i| i.pointer.interact_pos())) {
+                                        let rect = ui.max_rect();
+                                        if p.y >= rect.top() && p.y < rect.bottom() {
+                                            let slot = ri + usize::from(p.y > rect.center().y);
+                                            ui.data_mut(|d| d.insert_temp(slot_id, slot));
+                                        }
+                                    }
                                     let rs = rule_sev(ri);
                                     match (is_fired, rs) {
                                         (true, _) => dot(ui, t.accent, 7.0),
@@ -1664,7 +1728,7 @@ impl App {
                                         edit_box(ui, ed, acts);
                                         return;
                                     }
-                                    ui.add(egui::Label::new(RichText::new(one_line(&r.summary())).size(12.5).color(t.muted)).wrap_mode(TextWrapMode::Truncate));
+                                    ui.add(egui::Label::new(RichText::new(derived.notes[ri].as_str()).size(12.5).color(t.muted)).wrap_mode(TextWrapMode::Truncate));
                                 });
                                 if editable {
                                     if resp.double_clicked() {
@@ -1672,11 +1736,36 @@ impl App {
                                     }
                                     resp.context_menu(|ui| rule_menu(ui, decision, ri, nrules, acts));
                                 }
-                                if row.response().clicked() {
+                                let rr = row.response();
+                                if rr.clicked() && !rr.double_clicked() && dragging.is_none() {
                                     acts.push(Act::Select(ri));
                                 }
                             });
                         });
+                    if let Some(from) = dragging {
+                        let ctx = ui.ctx().clone();
+                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            ctx.data_mut(|d| {
+                                d.remove_temp::<usize>(drag_id);
+                                d.remove_temp::<usize>(slot_id);
+                            });
+                        } else if ctx.input(|i| i.pointer.any_released()) {
+                            let slot: Option<usize> = ctx.data(|d| d.get_temp(slot_id));
+                            ctx.data_mut(|d| {
+                                d.remove_temp::<usize>(drag_id);
+                                d.remove_temp::<usize>(slot_id);
+                            });
+                            if let Some(slot) = slot {
+                                let to = if slot > from { slot - 1 } else { slot };
+                                if to != from && to < nrules {
+                                    acts.push(Act::Edit(Edit::MoveRule { decision, from, to }));
+                                }
+                            }
+                        } else {
+                            ctx.request_repaint();
+                        }
+                    }
                 });
             });
         });
