@@ -1720,12 +1720,12 @@ impl App {
                                         });
                                     }
                                 };
-                                for ci in 0..tb.inputs.len() {
+                                for (ci, inp) in tb.inputs.iter().enumerate() {
                                     let e = r.inputs.get(ci);
-                                    cell(&mut row, e.map(|e| (e.text.as_str(), &e.lang)), e.map(|e| &e.tests), Col::Input(ci), true, tb.inputs[ci].type_ref.as_deref());
+                                    cell(&mut row, e.map(|e| (e.text.as_str(), &e.lang)), e.map(|e| &e.tests), Col::Input(ci), true, inp.type_ref.as_deref());
                                 }
-                                for oi in 0..tb.outputs.len() {
-                                    cell(&mut row, r.outputs.get(oi).map(|e| (e.text.as_str(), &e.lang)), None, Col::Output(oi), false, tb.outputs[oi].type_ref.as_deref());
+                                for (oi, out) in tb.outputs.iter().enumerate() {
+                                    cell(&mut row, r.outputs.get(oi).map(|e| (e.text.as_str(), &e.lang)), None, Col::Output(oi), false, out.type_ref.as_deref());
                                 }
                                 let note_at = Cursor::Note(ri);
                                 let (_, resp) = row.col(|ui| {
