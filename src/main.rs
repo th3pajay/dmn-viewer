@@ -1615,7 +1615,13 @@ impl App {
                                     }
                                     paint_cell(ui, false);
                                     if let Some(slot) = drop_slot {
-                                        let y = if slot == ri { Some(rect.top()) } else if slot == ri + 1 && ri + 1 == nrules { Some(rect.bottom()) } else { None };
+                                        let y = if slot == ri {
+                                            Some(rect.top())
+                                        } else if slot == ri + 1 && ri + 1 == nrules {
+                                            Some(rect.bottom())
+                                        } else {
+                                            None
+                                        };
                                         if let Some(y) = y {
                                             ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, t.accent));
                                         }
