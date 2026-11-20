@@ -337,10 +337,19 @@ impl App {
     }
 
     pub fn remember(&mut self, path: PathBuf) {
-        self.settings.recent.retain(|p| *p != path);
-        self.settings.recent.insert(0, path);
+        self.remember_all([path]);
+    }
+
+    pub fn remember_all(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        let before = self.settings.recent.clone();
+        for path in paths {
+            self.settings.recent.retain(|p| *p != path);
+            self.settings.recent.insert(0, path);
+        }
         self.settings.recent.truncate(RECENT_MAX);
-        self.settings.save();
+        if self.settings.recent != before {
+            self.settings.save();
+        }
     }
 
     fn state(&self) -> State {
@@ -504,7 +513,7 @@ impl App {
             Cmd::Open => act(self, Act::Open),
             Cmd::OpenRecent(n) => {
                 if let Some(p) = self.settings.recent.get(n).cloned() {
-                    self.guard(ctx, Pending::Load(p));
+                    self.load(p);
                 }
             }
             Cmd::ClearRecent => {

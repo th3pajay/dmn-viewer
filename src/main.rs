@@ -358,9 +358,7 @@ struct Tester {
 
 #[derive(Clone)]
 enum Pending {
-    Open,
     Reload,
-    Load(PathBuf),
     CloseTab(usize),
     Close,
 }
@@ -721,26 +719,49 @@ impl App {
     }
 
     fn load(&mut self, path: PathBuf) {
-        let key = tabs::key(&path);
-        if let Some(i) = self.tabs.iter().position(|t| t.key == key) {
-            self.activate(i);
-            self.error = None;
-            self.remember(path);
-            return;
-        }
-        match Workspace::open(path.clone()) {
-            Ok(mut ws) => {
-                if let Some(cur) = self.ws() {
-                    ws.adopt_view(cur);
-                }
-                self.next_uid += 1;
-                self.tabs.push(Tab::new(ws, key, self.next_uid));
-                self.activate(self.tabs.len() - 1);
-                self.error = None;
-                self.remember(path);
+        self.open_paths(vec![path]);
+    }
+
+    fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        let mut target = None;
+        let mut known = Vec::new();
+        let mut fresh: Vec<PathBuf> = Vec::with_capacity(paths.len());
+        let mut keys: Vec<PathBuf> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let key = tabs::key(&path);
+            if let Some(i) = self.tabs.iter().position(|t| t.key == key) {
+                target = Some(i);
+                known.push(path);
+            } else if !keys.contains(&key) {
+                keys.push(key);
+                fresh.push(path);
             }
-            Err(e) => self.error = Some(format!("Could not open {}: {e}", path.display())),
         }
+        let view = self.ws().map(Workspace::view);
+        let mut failed = Vec::new();
+        for ((path, key), opened) in fresh.iter().zip(keys).zip(Workspace::open_many(&fresh)) {
+            match opened {
+                Ok(mut ws) => {
+                    if let Some(v) = view {
+                        ws.set_view(v);
+                    }
+                    self.next_uid += 1;
+                    self.tabs.push(Tab::new(ws, key, self.next_uid));
+                    target = Some(self.tabs.len() - 1);
+                    known.push(path.clone());
+                }
+                Err(e) => failed.push(format!("{}: {e}", path.display())),
+            }
+        }
+        if let Some(i) = target {
+            self.activate(i);
+        }
+        self.remember_all(known);
+        self.error = match failed.len() {
+            0 => None,
+            1 => Some(format!("Could not open {}", failed[0])),
+            n => Some(format!("Could not open {n} files. {}", failed.join(" \u{b7} "))),
+        };
     }
 
     fn reload(&mut self) {
@@ -778,8 +799,8 @@ impl App {
     }
 
     fn open_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("DMN", &["dmn", "xml"]).add_filter("All files", &["*"]).pick_file() {
-            self.load(p);
+        if let Some(ps) = rfd::FileDialog::new().set_title("Open DMN files").add_filter("DMN", &["dmn", "xml"]).add_filter("All files", &["*"]).pick_files() {
+            self.open_paths(ps);
         }
     }
 
@@ -789,7 +810,6 @@ impl App {
 
     fn guard(&mut self, ctx: &egui::Context, p: Pending) {
         let dirty = match &p {
-            Pending::Open | Pending::Load(_) => None,
             Pending::Reload => self.ws().is_some_and(|l| l.dirty()).then_some(self.active),
             Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(|t| t.ws.dirty()).then_some(*i),
             Pending::Close => self.first_dirty(),
@@ -808,9 +828,7 @@ impl App {
 
     fn run(&mut self, ctx: &egui::Context, p: Pending) {
         match p {
-            Pending::Open => self.open_dialog(),
             Pending::Reload => self.reload(),
-            Pending::Load(p) => self.load(p),
             Pending::CloseTab(i) => self.close_tab(i),
             Pending::Close => match self.first_dirty() {
                 Some(i) => {
@@ -1087,7 +1105,7 @@ impl App {
                         l.set_decision(d);
                     }
                 }
-                Act::Open => self.guard(ctx, Pending::Open),
+                Act::Open => self.open_dialog(),
                 Act::Tab(i) => self.activate(i),
                 Act::StepTab { forward } => self.activate(tabs::step(self.active, self.tabs.len(), forward)),
                 Act::CloseTab(i) => self.guard(ctx, Pending::CloseTab(i)),
@@ -2825,7 +2843,7 @@ fn value_cell(ui: &mut egui::Ui, t: &Theme, v: &Value, bg: Color32, fg: Color32)
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        let dropped: Vec<PathBuf> = ctx.input(|i| if i.raw.dropped_files.is_empty() { Vec::new() } else { i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect() });
         let mut acts = Vec::new();
         self.shortcuts(&ctx, &mut acts);
         if ctx.input(|i| i.viewport().close_requested())
@@ -2860,8 +2878,8 @@ impl eframe::App for App {
             }
         }
         let reviewing = self.review.is_some() || self.is_fixing();
-        if let Some(p) = dropped.into_iter().next().filter(|_| !reviewing) {
-            self.guard(&ctx, Pending::Load(p));
+        if !dropped.is_empty() && !reviewing {
+            self.open_paths(dropped);
         }
         if !reviewing && !self.tabs.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D)) {
             acts.push(Act::Review);

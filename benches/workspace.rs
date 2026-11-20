@@ -97,6 +97,9 @@ fn document(c: &mut Criterion) {
     let defs = parse::parse(&xml).unwrap();
     g.bench_function("lint", |b| b.iter(|| black_box(lint::lint(black_box(&defs)))));
     g.bench_function("open", |b| b.iter(|| black_box(Workspace::open(path.clone()).unwrap())));
+    let batch: Vec<PathBuf> = (0..8).map(|n| scratch(&format!("batch-{n}.dmn"), &dmn(RULES / 5))).collect();
+    g.bench_function("open_batch_8_serial", |b| b.iter(|| black_box(batch.iter().map(|p| Workspace::open(p.clone()).unwrap()).collect::<Vec<_>>())));
+    g.bench_function("open_batch_8_parallel", |b| b.iter(|| black_box(Workspace::open_many(&batch))));
 
     let mut ws = Workspace::open(path.clone()).unwrap();
     let mut n = 0u64;

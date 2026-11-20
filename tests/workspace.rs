@@ -539,3 +539,28 @@ fn the_outcome_does_not_depend_on_the_test_tab() {
     assert!(ws.commit_group(&[Edit::InsertInput { decision: 0, at: 3 }], None));
     assert_eq!(ws.tests().outcome().unwrap().fired, vec![0]);
 }
+
+#[test]
+fn opening_many_keeps_the_order_and_reports_each_failure_in_place() {
+    let mut paths: Vec<PathBuf> = (0..11).map(|n| scratch(&format!("many-{n}.dmn"), table_xml(&[(r#""EU""#, &format!("\"{n}\""))]).as_bytes())).collect();
+    paths.insert(3, scratch("many-broken.dmn", b"<definitions"));
+    paths.insert(7, std::env::temp_dir().join("dmn-viewer-missing-file.dmn"));
+    let opened = Workspace::open_many(&paths);
+    assert_eq!(opened.len(), paths.len());
+    for (path, ws) in paths.iter().zip(&opened) {
+        match ws {
+            Ok(ws) => assert_eq!(ws.path(), path),
+            Err(_) => assert!(path.ends_with("many-broken.dmn") || path.ends_with("dmn-viewer-missing-file.dmn"), "{}", path.display()),
+        }
+    }
+    assert_eq!(opened.iter().filter(|r| r.is_err()).count(), 2);
+    assert_eq!(output(opened[0].as_ref().unwrap(), 0), "\"0\"");
+    assert_eq!(output(opened[12].as_ref().unwrap(), 0), "\"10\"");
+}
+
+#[test]
+fn opening_one_or_none_needs_no_threads() {
+    assert!(Workspace::open_many(&[]).is_empty());
+    let one = Workspace::open_many(&[scratch("many-one.dmn", table_xml(&[("-", r#""A""#)]).as_bytes())]);
+    assert!(one[0].is_ok());
+}

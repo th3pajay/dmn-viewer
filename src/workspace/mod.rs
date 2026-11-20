@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub use document::READ_ONLY;
 pub use fixing::{Applied, FixView, Preview};
@@ -107,6 +108,32 @@ impl Workspace {
             notice: None,
             clip: None,
         })
+    }
+
+    pub fn open_many(paths: &[PathBuf]) -> Vec<Result<Workspace, String>> {
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(paths.len());
+        if workers <= 1 {
+            return paths.iter().map(|p| Workspace::open(p.clone())).collect();
+        }
+        let next = AtomicUsize::new(0);
+        let mut out: Vec<Option<Result<Workspace, String>>> = std::iter::repeat_with(|| None).take(paths.len()).collect();
+        std::thread::scope(|s| {
+            let pull = || {
+                let mut got = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(p) = paths.get(i) else { break got };
+                    got.push((i, Workspace::open(p.clone())));
+                }
+            };
+            let handles: Vec<_> = (0..workers).map(|_| s.spawn(pull)).collect();
+            for h in handles {
+                for (i, r) in h.join().unwrap_or_default() {
+                    out[i] = Some(r);
+                }
+            }
+        });
+        out.into_iter().map(|r| r.unwrap_or_else(|| Err("could not be read".into()))).collect()
     }
 
     pub fn adopt_view(&mut self, from: &Workspace) {
