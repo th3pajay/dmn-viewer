@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -42,6 +43,15 @@ pub fn width(available: f32, count: usize, gap: f32) -> f32 {
     (available / count.max(1) as f32 - gap).clamp(MIN_WIDTH, MAX_WIDTH)
 }
 
+pub fn quit_label(picked: usize, total: usize) -> Cow<'static, str> {
+    match picked {
+        0 => "Exit without saving".into(),
+        _ if picked < total => format!("Save {picked} and exit").into(),
+        _ if total == 1 => "Save and exit".into(),
+        _ => "Save all and exit".into(),
+    }
+}
+
 pub fn slot_at(x: f32, origin: f32, width: f32, gap: f32, count: usize) -> usize {
     (((x - origin) / (width + gap)).max(0.0) as usize).min(count.saturating_sub(1))
 }
@@ -56,6 +66,15 @@ mod tests {
         assert_eq!(slot_at(150.0, 0.0, 100.0, 2.0, 4), 1);
         assert_eq!(slot_at(-40.0, 0.0, 100.0, 2.0, 4), 0);
         assert_eq!(slot_at(9000.0, 0.0, 100.0, 2.0, 4), 3);
+    }
+
+    #[test]
+    fn the_quit_button_says_what_it_will_save() {
+        assert_eq!(quit_label(0, 3), "Exit without saving");
+        assert_eq!(quit_label(2, 3), "Save 2 and exit");
+        assert_eq!(quit_label(3, 3), "Save all and exit");
+        assert_eq!(quit_label(1, 1), "Save and exit");
+        assert!(matches!(quit_label(3, 3), Cow::Borrowed(_)));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::{Act, App, Pending, View, bold, hex, ic, small_button};
+use crate::{Act, App, View, bold, hex, ic, small_button};
 use dmn_viewer::export::Format;
 use dmn_viewer::lint;
 use dmn_viewer::workspace::RuleOp;
@@ -369,7 +369,7 @@ impl App {
         State {
             doc: l.is_some(),
             tabs: self.tabs.len(),
-            modal: self.review.is_some() || self.pending.is_some(),
+            modal: self.review.is_some() || self.pending.is_some() || self.quit.is_some(),
             editable: l.is_some_and(|l| l.editable()),
             dirty: l.is_some_and(|l| l.dirty()),
             locked: self.review.is_some() || self.is_fixing(),
@@ -476,7 +476,7 @@ impl App {
     }
 
     pub fn shortcuts(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        if self.pending.is_some() || !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
+        if self.pending.is_some() || self.quit.is_some() || !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
             return;
         }
         let s = self.state();
@@ -545,7 +545,7 @@ impl App {
             Cmd::NextTab => act(self, Act::StepTab { forward: true }),
             Cmd::PrevTab => act(self, Act::StepTab { forward: false }),
             Cmd::Tab(n) => act(self, Act::Tab(n)),
-            Cmd::Quit => self.guard(ctx, Pending::Close),
+            Cmd::Quit => self.request_quit(ctx),
             Cmd::Undo => act(self, Act::Undo),
             Cmd::Redo => act(self, Act::Redo),
             Cmd::Find => {

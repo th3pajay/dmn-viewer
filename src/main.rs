@@ -360,7 +360,31 @@ struct Tester {
 enum Pending {
     Reload,
     CloseTab(usize),
-    Close,
+}
+
+struct Quit {
+    rows: Vec<(u64, bool)>,
+    picked: usize,
+    label: std::borrow::Cow<'static, str>,
+    error: Option<String>,
+}
+
+impl Quit {
+    fn new(uids: Vec<u64>) -> Quit {
+        let n = uids.len();
+        Quit { rows: uids.into_iter().map(|u| (u, true)).collect(), picked: n, label: tabs::quit_label(n, n), error: None }
+    }
+
+    fn recount(&mut self) {
+        self.picked = self.rows.iter().filter(|r| r.1).count();
+        self.label = tabs::quit_label(self.picked, self.rows.len());
+    }
+}
+
+enum Quitting {
+    Save,
+    Discard,
+    Cancel,
 }
 
 enum HeaderForm {
@@ -600,6 +624,7 @@ struct App {
     show_langs: bool,
     theme: Theme,
     pending: Option<Pending>,
+    quit: Option<Quit>,
     allow_close: bool,
     review: Option<Review>,
     settings: menu::Settings,
@@ -693,6 +718,7 @@ impl App {
             show_langs: false,
             theme,
             pending: None,
+            quit: None,
             allow_close: false,
             review: None,
             settings: menu::Settings::load(),
@@ -887,15 +913,68 @@ impl App {
         }
     }
 
-    fn first_dirty(&self) -> Option<usize> {
-        self.tabs.iter().position(Tab::dirty)
+    fn unsaved(&mut self) -> Option<Quit> {
+        let mut uids = Vec::new();
+        for tab in &mut self.tabs {
+            if let Some(ws) = tab.ws.as_mut() {
+                ws.flush_editing();
+                if ws.dirty() {
+                    ws.fix_close();
+                    uids.push(tab.uid);
+                }
+            }
+        }
+        (!uids.is_empty()).then(|| Quit::new(uids))
     }
 
-    fn guard(&mut self, ctx: &egui::Context, p: Pending) {
+    fn request_quit(&mut self, ctx: &egui::Context) {
+        if self.quit.is_some() {
+            return;
+        }
+        match self.unsaved() {
+            Some(q) => {
+                self.review = None;
+                self.pending = None;
+                self.quit = Some(q);
+            }
+            None => self.exit(ctx),
+        }
+    }
+
+    fn exit(&mut self, ctx: &egui::Context) {
+        self.quit = None;
+        self.allow_close = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn save_picked(&mut self, ctx: &egui::Context) {
+        let Some(q) = self.quit.as_mut() else { return };
+        let mut failed = None;
+        q.rows.retain(|&(uid, on)| {
+            if !on || failed.is_some() {
+                return true;
+            }
+            let Some(ws) = self.tabs.iter_mut().find(|t| t.uid == uid).and_then(|t| t.ws.as_mut()) else { return false };
+            if ws.save() {
+                return false;
+            }
+            failed = Some(format!("Could not save {}. {}", tabs::label(ws.path()), ws.error().unwrap_or_default()));
+            ws.clear_error();
+            true
+        });
+        match failed {
+            Some(e) => {
+                q.error = Some(e);
+                q.recount();
+            }
+            None => self.exit(ctx),
+        }
+    }
+
+    fn guard(&mut self, p: Pending) {
         let dirty = match &p {
             Pending::Reload => self.ws().is_some_and(|l| l.dirty()).then_some(self.active),
             Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(Tab::dirty).then_some(*i),
-            Pending::Close => self.first_dirty(),
         };
         match dirty {
             Some(i) => {
@@ -905,24 +984,14 @@ impl App {
                     p => p,
                 });
             }
-            None => self.run(ctx, p),
+            None => self.run(p),
         }
     }
 
-    fn run(&mut self, ctx: &egui::Context, p: Pending) {
+    fn run(&mut self, p: Pending) {
         match p {
             Pending::Reload => self.reload(),
             Pending::CloseTab(i) => self.close_tab(i),
-            Pending::Close => match self.first_dirty() {
-                Some(i) => {
-                    self.activate(i);
-                    self.pending = Some(Pending::Close);
-                }
-                None => {
-                    self.allow_close = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            },
         }
     }
 
@@ -1060,17 +1129,84 @@ impl App {
         match choice {
             Some("save") if self.save() => {
                 self.pending = None;
-                self.run(ctx, p);
+                self.run(p);
             }
             Some("discard") => {
                 self.pending = None;
                 if let Some(l) = self.ws_mut() {
                     l.discard();
                 }
-                self.run(ctx, p);
+                self.run(p);
             }
             Some("cancel") => self.pending = None,
             _ => {}
+        }
+    }
+
+    fn quit_modal(&mut self, ctx: &egui::Context) {
+        let Some(q) = self.quit.as_mut() else { return };
+        let t = self.theme;
+        let tabs = &self.tabs;
+        let mut choice = None;
+        let mut toggled = false;
+        let modal = egui::Modal::new(egui::Id::new("quit_unsaved")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.label(bold("Unsaved changes", 15.0).color(t.text));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(if q.rows.len() == 1 {
+                    "This file has changes that are not saved. Unticked files are discarded."
+                } else {
+                    "These files have changes that are not saved. Unticked files are discarded."
+                })
+                .color(t.muted),
+            );
+            ui.add_space(8.0);
+            if q.rows.len() > 1 {
+                let (mut all, some) = (q.picked == q.rows.len(), q.picked > 0 && q.picked < q.rows.len());
+                if ui.add(egui::Checkbox::new(&mut all, RichText::new("All files").color(t.muted)).indeterminate(some)).changed() {
+                    q.rows.iter_mut().for_each(|r| r.1 = all);
+                    toggled = true;
+                }
+                ui.separator();
+            }
+            egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+                for (uid, on) in &mut q.rows {
+                    let Some(tab) = tabs.iter().find(|t| t.uid == *uid) else { continue };
+                    let r = ui.checkbox(on, tab.label.as_ref()).on_hover_ui(|ui| {
+                        ui.label(tab.path.display().to_string());
+                    });
+                    toggled |= r.changed();
+                }
+            });
+            if let Some(e) = &q.error {
+                ui.add_space(6.0);
+                ui.label(RichText::new(e.as_str()).color(t.error_text));
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if button(ui, &t, if q.picked == 0 { ic::TRASH } else { ic::SAVE }, &q.label, true).clicked() {
+                    choice = Some(if q.picked == 0 { Quitting::Discard } else { Quitting::Save });
+                }
+                if q.picked > 0 && button(ui, &t, ic::TRASH, "Discard all", false).clicked() {
+                    choice = Some(Quitting::Discard);
+                }
+                if button(ui, &t, ic::X, "Cancel", false).on_hover_text("Esc").clicked() {
+                    choice = Some(Quitting::Cancel);
+                }
+            });
+        });
+        if toggled {
+            q.recount();
+        }
+        if modal.should_close() {
+            choice = choice.or(Some(Quitting::Cancel));
+        }
+        match choice {
+            Some(Quitting::Save) => self.save_picked(ctx),
+            Some(Quitting::Discard) => self.exit(ctx),
+            Some(Quitting::Cancel) => self.quit = None,
+            None => {}
         }
     }
 
@@ -1193,10 +1329,10 @@ impl App {
                 Act::Open => self.open_dialog(),
                 Act::Tab(i) => self.activate(i),
                 Act::StepTab { forward } => self.activate(tabs::step(self.active, self.tabs.len(), forward)),
-                Act::CloseTab(i) => self.guard(ctx, Pending::CloseTab(i)),
+                Act::CloseTab(i) => self.guard(Pending::CloseTab(i)),
                 Act::MoveTab { from, to } => self.move_tab(from, to),
                 Act::TabDropped => self.persist_tabs(),
-                Act::Reload => self.guard(ctx, Pending::Reload),
+                Act::Reload => self.guard(Pending::Reload),
                 Act::ToggleDark => {
                     self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
                     apply_theme(ctx, &self.theme);
@@ -2975,20 +3111,20 @@ impl eframe::App for App {
         let mut acts = Vec::new();
         self.shortcuts(&ctx, &mut acts);
         if ctx.input(|i| i.viewport().close_requested()) {
-            match self.first_dirty().filter(|_| !self.allow_close) {
-                Some(i) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    self.review = None;
-                    self.activate(i);
-                    if let Some(l) = self.ws_mut() {
-                        l.fix_close();
-                    }
-                    self.pending = Some(Pending::Close);
-                }
-                None => self.persist_tabs(),
+            if self.allow_close {
+                self.persist_tabs();
+            } else if self.quit.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else if let Some(q) = self.unsaved() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.review = None;
+                self.pending = None;
+                self.quit = Some(q);
+            } else {
+                self.persist_tabs();
             }
         }
-        if self.is_fixing() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
+        if self.is_fixing() && self.review.is_none() && self.pending.is_none() && self.quit.is_none() && ctx.memory(|m| m.focused().is_none()) {
             let step = self.ws().is_some_and(|l| l.fix_offering());
             let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
             if step {
@@ -3007,7 +3143,7 @@ impl eframe::App for App {
                 acts.push(Act::FixClose);
             }
         }
-        let reviewing = self.review.is_some() || self.is_fixing();
+        let reviewing = self.review.is_some() || self.quit.is_some() || self.is_fixing();
         if !dropped.is_empty() && !reviewing {
             self.open_paths(dropped);
         }
@@ -3115,6 +3251,7 @@ impl eframe::App for App {
         self.help_window(&ctx);
         self.review_modal(&ctx);
         self.pending_modal(&ctx);
+        self.quit_modal(&ctx);
     }
 }
 
