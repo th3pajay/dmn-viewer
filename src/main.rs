@@ -526,19 +526,35 @@ struct Derived {
     notes: Vec<String>,
 }
 
-struct App {
-    loaded: Option<Workspace>,
-    error: Option<String>,
+#[derive(Default)]
+struct RuleCache {
     filter: String,
-    visible_cache: Option<(String, usize, u64, Arc<Vec<usize>>)>,
+    visible: Option<(String, usize, u64, Arc<Vec<usize>>)>,
     derived: Option<(usize, u64, Arc<Derived>)>,
+}
+
+struct Tab {
+    ws: Workspace,
+    tester: Tester,
+    rules: RuleCache,
+    sev_filter: Option<Severity>,
+    header_form: Option<HeaderForm>,
+}
+
+impl Tab {
+    fn new(ws: Workspace) -> Tab {
+        Tab { ws, tester: Tester::default(), rules: RuleCache::default(), sev_filter: None, header_form: None }
+    }
+}
+
+struct App {
+    tabs: Vec<Tab>,
+    active: usize,
+    error: Option<String>,
     detail_after: f64,
     detail_open: bool,
-    sev_filter: Option<Severity>,
     show_langs: bool,
     theme: Theme,
-    tester: Tester,
-    header_form: Option<HeaderForm>,
     pending: Option<Pending>,
     allow_close: bool,
     review: Option<Review>,
@@ -623,18 +639,13 @@ impl App {
         let theme = Theme::light();
         apply_theme(&cc.egui_ctx, &theme);
         let mut app = App {
-            loaded: None,
+            tabs: Vec::new(),
+            active: 0,
             error: None,
-            filter: String::new(),
-            visible_cache: None,
-            derived: None,
             detail_after: 0.0,
             detail_open: false,
-            sev_filter: None,
             show_langs: false,
             theme,
-            tester: Tester::default(),
-            header_form: None,
             pending: None,
             allow_close: false,
             review: None,
@@ -647,7 +658,7 @@ impl App {
         if let Some(p) = args.path {
             app.load(p);
         }
-        if let Some(l) = app.loaded.as_mut() {
+        if let Some(l) = app.ws_mut() {
             if let Some(v) = args.view {
                 l.set_view(v);
             }
@@ -661,23 +672,43 @@ impl App {
         app
     }
 
+    fn tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active)
+    }
+
+    fn tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active)
+    }
+
+    fn ws(&self) -> Option<&Workspace> {
+        self.tab().map(|t| &t.ws)
+    }
+
+    fn ws_mut(&mut self) -> Option<&mut Workspace> {
+        self.tab_mut().map(|t| &mut t.ws)
+    }
+
     fn load(&mut self, path: PathBuf) {
-        let same_file = self.loaded.as_ref().is_some_and(|l| l.path() == path);
-        let opened = if same_file {
-            self.loaded.as_mut().expect("same file implies loaded").reload()
-        } else {
-            Workspace::open(path.clone()).map(|mut ws| {
-                self.tester = Tester::default();
-                if let Some(old) = self.loaded.as_ref() {
-                    ws.adopt_view(old);
+        let opened = match self.tabs.get_mut(self.active) {
+            Some(tab) if tab.ws.path() == path => tab.ws.reload(),
+            _ => Workspace::open(path.clone()).map(|mut ws| match self.tabs.get_mut(self.active) {
+                Some(tab) => {
+                    ws.adopt_view(&tab.ws);
+                    tab.ws = ws;
+                    tab.tester = Tester::default();
                 }
-                self.loaded = Some(ws);
-            })
+                None => {
+                    self.tabs.push(Tab::new(ws));
+                    self.active = self.tabs.len() - 1;
+                }
+            }),
         };
         match opened {
             Ok(()) => {
                 self.error = None;
-                self.header_form = None;
+                if let Some(tab) = self.tab_mut() {
+                    tab.header_form = None;
+                }
                 self.remember(path);
             }
             Err(e) => self.error = Some(format!("Could not open {}: {e}", path.display())),
@@ -691,7 +722,7 @@ impl App {
     }
 
     fn guard(&mut self, ctx: &egui::Context, p: Pending) {
-        if self.loaded.as_ref().is_some_and(|l| l.dirty()) {
+        if self.ws().is_some_and(|l| l.dirty()) {
             self.pending = Some(p);
         } else {
             self.run(ctx, p);
@@ -702,17 +733,17 @@ impl App {
         match p {
             Pending::Open => self.open_dialog(),
             Pending::Reload => {
-                if let Some(p) = self.loaded.as_ref().map(|l| l.path().to_path_buf()) {
+                if let Some(p) = self.ws().map(|l| l.path().to_path_buf()) {
                     self.load(p);
                 }
             }
             Pending::Load(p) => self.load(p),
             Pending::CloseFile => {
-                self.loaded = None;
-                self.tester = Tester::default();
+                if self.active < self.tabs.len() {
+                    self.tabs.remove(self.active);
+                }
+                self.active = self.active.min(self.tabs.len().saturating_sub(1));
                 self.review = None;
-                self.header_form = None;
-                self.filter.clear();
                 self.error = None;
             }
             Pending::Close => {
@@ -723,37 +754,37 @@ impl App {
     }
 
     fn is_fixing(&self) -> bool {
-        self.loaded.as_ref().is_some_and(|l| l.is_fixing())
+        self.ws().is_some_and(|l| l.is_fixing())
     }
 
     fn decision(&self) -> usize {
-        self.loaded.as_ref().map_or(0, |l| l.decision())
+        self.ws().map_or(0, |l| l.decision())
     }
 
     fn selected(&self) -> Option<usize> {
-        self.loaded.as_ref().and_then(|l| l.selected())
+        self.ws().and_then(|l| l.selected())
     }
 
     fn view(&self) -> View {
-        self.loaded.as_ref().map_or_else(View::default, |l| l.view())
+        self.ws().map_or_else(View::default, |l| l.view())
     }
 
     fn save(&mut self) -> bool {
-        self.loaded.as_mut().is_some_and(|l| l.save())
+        self.ws_mut().is_some_and(|l| l.save())
     }
 
     fn open_review(&mut self) {
-        if let Some(l) = self.loaded.as_mut() {
+        if let Some(l) = self.ws_mut() {
             l.flush_editing();
         }
-        let Some(l) = &self.loaded else { return };
+        let Some(l) = self.ws() else { return };
         let hunks = l.changes();
         let lines = hunks.iter().map(|h| (diff::line_count(&l.saved()[h.old.clone()]), diff::line_count(&l.xml()[h.new.clone()]))).collect();
         self.review = Some(Review { hunks, lines });
     }
 
     fn review_modal(&mut self, ctx: &egui::Context) {
-        let (Some(rv), Some(l)) = (&self.review, &self.loaded) else { return };
+        let (Some(rv), Some(l)) = (&self.review, self.ws()) else { return };
         let t = self.theme;
         let mut choice = None;
         let screen = ctx.content_rect();
@@ -833,7 +864,7 @@ impl App {
     fn pending_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let t = self.theme;
-        let file = self.loaded.as_ref().and_then(|l| l.path().file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let file = self.ws().and_then(|l| l.path().file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let mut choice = None;
         egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
             ui.set_width(360.0);
@@ -860,7 +891,7 @@ impl App {
             }
             Some("discard") => {
                 self.pending = None;
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.discard();
                 }
                 self.run(ctx, p);
@@ -873,7 +904,8 @@ impl App {
     fn header_window(&mut self, ctx: &egui::Context) {
         let t = self.theme;
         let decision = self.decision();
-        let Some(form) = self.header_form.as_mut() else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(form) = tab.header_form.as_mut() else { return };
         let title = if matches!(form, HeaderForm::Input { .. }) { "Edit input" } else { "Edit output" };
         let mut open = true;
         let mut done = None;
@@ -935,12 +967,10 @@ impl App {
         match done {
             Some(true) => {
                 let edit = form.edit(decision);
-                self.header_form = None;
-                if let Some(l) = self.loaded.as_mut() {
-                    l.commit(edit);
-                }
+                tab.header_form = None;
+                tab.ws.commit(edit);
             }
-            Some(false) => self.header_form = None,
+            Some(false) => tab.header_form = None,
             None => {}
         }
     }
@@ -949,7 +979,7 @@ impl App {
         for a in acts {
             match a {
                 Act::Select(r) => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         let opening = l.selected().is_none();
                         l.select(r);
                         if opening {
@@ -959,29 +989,29 @@ impl App {
                     }
                 }
                 Act::Jump(r) => {
-                    if let Some(l) = self.loaded.as_mut() {
-                        l.jump(r);
-                        self.filter.clear();
+                    if let Some(tab) = self.tab_mut() {
+                        tab.ws.jump(r);
+                        tab.rules.filter.clear();
                     }
                 }
                 Act::View(v) => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.set_view(v);
                     }
                 }
                 Act::TestRule(r) => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(Tab { ws: l, tester, .. }) = self.tabs.get_mut(self.active) {
                         if l.tests().fill_to_fire(r) {
                             l.select_and_reveal(r);
                             l.set_view(View::Test);
-                            self.tester.scroll_target = true;
+                            tester.scroll_target = true;
                         } else {
                             self.error = Some(format!("Could not find inputs that make rule {} fire.", r + 1));
                         }
                     }
                 }
                 Act::Decision(d) => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.set_decision(d);
                     }
                 }
@@ -991,39 +1021,47 @@ impl App {
                     self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
                     apply_theme(ctx, &self.theme);
                 }
-                Act::SevFilter(s) => self.sev_filter = s,
+                Act::SevFilter(s) => {
+                    if let Some(tab) = self.tab_mut() {
+                        tab.sev_filter = s;
+                    }
+                }
                 Act::ToggleLangs => self.show_langs = !self.show_langs,
                 Act::Deselect => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.deselect();
                     }
                 }
                 Act::Edit(e) => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.commit(e);
                     }
                 }
                 Act::BeginEdit(at, text) => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.begin_edit(at, text);
                     }
                 }
                 Act::EndEdit { at, commit } => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.end_edit(at, commit);
                     }
                 }
-                Act::EditHeader(c) => self.header_form = self.loaded.as_ref().and_then(|l| l.defs().table(l.decision())).and_then(|t| HeaderForm::new(t, c)),
+                Act::EditHeader(c) => {
+                    if let Some(tab) = self.tab_mut() {
+                        tab.header_form = tab.ws.defs().table(tab.ws.decision()).and_then(|t| HeaderForm::new(t, c));
+                    }
+                }
                 Act::Save => {
                     self.save();
                 }
                 Act::Undo => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.undo();
                     }
                 }
                 Act::Redo => {
-                    if let Some(l) = self.loaded.as_mut() {
+                    if let Some(l) = self.ws_mut() {
                         l.redo();
                     }
                 }
@@ -1035,12 +1073,13 @@ impl App {
     }
 
     fn fix_act(&mut self, a: Act) {
-        let Some(l) = self.loaded.as_mut() else { return };
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let l = &mut tab.ws;
         match a {
             Act::FixStart(only) => {
                 if l.fix_start(only) {
-                    self.header_form = None;
-                    self.filter.clear();
+                    tab.header_form = None;
+                    tab.rules.filter.clear();
                 }
             }
             Act::FixChoose(i) => l.fix_choose(i),
@@ -1072,7 +1111,7 @@ impl App {
             ui.label(bold("DMN Viewer", 14.5).color(t.text));
         });
         ui.add_space(14.0);
-        if let Some(l) = &self.loaded {
+        if let Some(l) = self.ws() {
             group_label(ui, t, "Decisions");
             for (i, d) in l.defs().decisions.iter().enumerate() {
                 let errs = l.issues().iter().filter(|x| x.decision == Some(i) && x.severity == Severity::Error).count();
@@ -1113,13 +1152,14 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(l) = &self.loaded else { return };
+        let Some(Tab { ws: l, rules, .. }) = self.tabs.get_mut(self.active) else { return };
+        let l = &*l;
         let decision = l.decision();
         let view = l.view();
         let file = l.path().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let dec = l.defs().decisions.get(decision);
         let dirty = l.dirty();
-        let fixing = self.is_fixing();
+        let fixing = l.is_fixing();
         let fixable = l.fixable_count();
         let dmn_version = l.defs().dmn_version;
         ui.horizontal_centered(|ui| {
@@ -1215,10 +1255,10 @@ impl App {
                         .inner_margin(Margin::symmetric(10, 5))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if !self.filter.is_empty() && ui.add(egui::Button::new(RichText::new(ic::X).color(t.muted)).frame(false)).clicked() {
-                                    self.filter.clear();
+                                if !rules.filter.is_empty() && ui.add(egui::Button::new(RichText::new(ic::X).color(t.muted)).frame(false)).clicked() {
+                                    rules.filter.clear();
                                 }
-                                let filter = ui.add(egui::TextEdit::singleline(&mut self.filter).frame(Frame::NONE).hint_text("Filter rules").desired_width(170.0));
+                                let filter = ui.add(egui::TextEdit::singleline(&mut rules.filter).frame(Frame::NONE).hint_text("Filter rules").desired_width(170.0));
                                 if std::mem::take(&mut self.shell.focus_filter) {
                                     filter.request_focus();
                                 }
@@ -1231,20 +1271,22 @@ impl App {
     }
 
     fn rules_view(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-        let Some(l) = self.loaded.as_mut() else { return };
-        let mut editing = l.take_editing();
-        let mut scroll = l.take_scroll();
-        self.rules_body(ui, acts, &mut editing, &mut scroll);
-        if let Some(l) = self.loaded.as_mut() {
-            l.restore_editing(editing);
-            l.restore_scroll(scroll);
+        let Some(tab) = self.tab_mut() else { return };
+        let mut editing = tab.ws.take_editing();
+        let mut scroll = tab.ws.take_scroll();
+        let mut cache = std::mem::take(&mut tab.rules);
+        self.rules_body(ui, acts, &mut editing, &mut scroll, &mut cache);
+        if let Some(tab) = self.tab_mut() {
+            tab.ws.restore_editing(editing);
+            tab.ws.restore_scroll(scroll);
+            tab.rules = cache;
         }
     }
 
-    fn rules_body(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>, editing: &mut Option<Editing>, scroll: &mut Option<usize>) {
+    fn rules_body(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>, editing: &mut Option<Editing>, scroll: &mut Option<usize>, cache: &mut RuleCache) {
         let t = self.theme;
         let (outcome, coverage) = {
-            let Some(l) = self.loaded.as_mut() else { return };
+            let Some(l) = self.ws_mut() else { return };
             let mut tests = l.tests();
             match tests.table() {
                 Some(_) => {
@@ -1256,7 +1298,7 @@ impl App {
             }
         };
         let fired: &[usize] = outcome.as_ref().map_or(&[], |o| &o.fired);
-        let Some(l) = &self.loaded else { return };
+        let Some(l) = self.tabs.get(self.active).map(|t| &t.ws) else { return };
         let decision = l.decision();
         let Some(dec) = l.defs().decisions.get(decision) else { return };
         let tb = match &dec.logic {
@@ -1287,7 +1329,7 @@ impl App {
 
         let (n_in, n_out) = (tb.inputs.len(), tb.outputs.len());
         let revision = l.revision();
-        let derived = match &self.derived {
+        let derived = match &cache.derived {
             Some((d, rev, s)) if *d == decision && *rev == revision => s.clone(),
             _ => {
                 let mut rule = vec![None; nrules];
@@ -1308,7 +1350,7 @@ impl App {
                 }
                 let notes = tb.rules.iter().map(|r| one_line(&r.summary())).collect();
                 let s = Arc::new(Derived { rule, cell, notes });
-                self.derived = Some((decision, revision, s.clone()));
+                cache.derived = Some((decision, revision, s.clone()));
                 s
             }
         };
@@ -1320,10 +1362,10 @@ impl App {
         };
         let col_issue = |c: Col| issues.iter().filter(|i| i.column == Some(c) && i.rules.is_empty() && i.severity != Severity::Info).min_by_key(|i| i.severity).copied();
 
-        let visible = match &self.visible_cache {
-            Some((f, d, rev, v)) if *d == decision && *rev == revision && *f == self.filter => v.clone(),
+        let visible = match &cache.visible {
+            Some((f, d, rev, v)) if *d == decision && *rev == revision && *f == cache.filter => v.clone(),
             _ => {
-                let f = self.filter.to_lowercase();
+                let f = cache.filter.to_lowercase();
                 let v: Arc<Vec<usize>> = Arc::new(
                     (0..nrules)
                         .filter(|&ri| {
@@ -1335,7 +1377,7 @@ impl App {
                         })
                         .collect(),
                 );
-                self.visible_cache = Some((self.filter.clone(), decision, revision, v.clone()));
+                cache.visible = Some((cache.filter.clone(), decision, revision, v.clone()));
                 v
             }
         };
@@ -1779,13 +1821,14 @@ impl App {
 
     fn issue_list(&self, ui: &mut egui::Ui, issues: &[&Issue], nrules: usize, wide: bool, acts: &mut Vec<Act>) {
         let t = &self.theme;
+        let sev_filter = self.tab().and_then(|t| t.sev_filter);
         let count = |s: Severity| issues.iter().filter(|i| i.severity == s).count();
         Frame::new().inner_margin(Margin { left: 16, right: 16, top: 16, bottom: 10 }).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(bold("Issues", 15.0).color(t.text));
                 if wide {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(l) = &self.loaded
+                        if let Some(l) = self.ws()
                             && button(ui, t, ic::COPY, "Copy report", false).clicked()
                         {
                             ui.ctx().copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
@@ -1801,7 +1844,7 @@ impl App {
                         None => issues.len(),
                         Some(s) => count(s),
                     };
-                    let on = self.sev_filter == sev;
+                    let on = sev_filter == sev;
                     let (bg, fg) = if on { (t.text, t.surface) } else { (t.chip, t.muted) };
                     let resp = pill(ui, format!("{label} {n}"), bg, fg).interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
@@ -1812,7 +1855,7 @@ impl App {
         });
         let pr = ui.max_rect();
         ui.painter().hline(pr.x_range(), ui.cursor().top(), Stroke::new(1.0, t.line_soft));
-        let shown: Vec<&&Issue> = issues.iter().filter(|i| self.sev_filter.is_none_or(|s| i.severity == s)).collect();
+        let shown: Vec<&&Issue> = issues.iter().filter(|i| sev_filter.is_none_or(|s| i.severity == s)).collect();
         egui::ScrollArea::vertical().id_salt(if wide { "iss_wide" } else { "iss_side" }).auto_shrink([false, false]).show(ui, |ui| {
             Frame::new().inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 14 }).show(ui, |ui| {
                 if shown.is_empty() {
@@ -1851,10 +1894,10 @@ impl App {
                                 if !row_specific(is, nrules) && !is.rules.is_empty() {
                                     ui.label(RichText::new("table-wide").size(11.0).color(t.faint));
                                 }
-                                let key = self.loaded.as_ref().and_then(|l| l.fixable_key(is));
+                                let key = self.ws().and_then(|l| l.fixable_key(is));
                                 if let Some(key) = key {
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if self.loaded.as_ref().is_some_and(|l| l.is_skipped(&key)) {
+                                        if self.ws().is_some_and(|l| l.is_skipped(&key)) {
                                             pill(ui, "skipped", t.chip, t.faint).on_hover_text("Skipped in a fix session. Reload the file or use \"Show skipped again\" to be asked again.");
                                         } else if !self.is_fixing() && small_button(ui, t, ic::CHECK, "Fix").on_hover_text("Review the automatic fix for this issue").clicked() {
                                             acts.push(Act::FixStart(Some(key)));
@@ -1895,7 +1938,7 @@ impl App {
 
     fn issues_view(&self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(l) = &self.loaded else { return };
+        let Some(l) = self.ws() else { return };
         let issues: Vec<&Issue> = l.issues().iter().filter(|i| i.decision == Some(self.decision()) || i.decision.is_none()).collect();
         let nrules = l.defs().table(self.decision()).map(|t| t.rules.len()).unwrap_or(0);
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin::symmetric(20, 16))).show(ui, |ui| {
@@ -1911,7 +1954,7 @@ impl App {
 
     fn xml_view(&self, ui: &mut egui::Ui) {
         let t = self.theme;
-        let Some(l) = &self.loaded else { return };
+        let Some(l) = self.ws() else { return };
         egui::CentralPanel::default().frame(Frame::new().fill(t.canvas).inner_margin(Margin::symmetric(20, 16))).show(ui, |ui| {
             Frame::new().fill(t.surface).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(12)).show(ui, |ui| {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -2635,17 +2678,17 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         let mut acts = Vec::new();
         self.shortcuts(&ctx, &mut acts);
-        let dirty = self.loaded.as_ref().is_some_and(|l| l.dirty());
+        let dirty = self.ws().is_some_and(|l| l.dirty());
         if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.review = None;
-            if let Some(l) = self.loaded.as_mut() {
+            if let Some(l) = self.ws_mut() {
                 l.fix_close();
             }
             self.pending = Some(Pending::Close);
         }
         if self.is_fixing() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
-            let step = self.loaded.as_ref().is_some_and(|l| l.fix_offering());
+            let step = self.ws().is_some_and(|l| l.fix_offering());
             let key = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
             if step {
                 if key(egui::Key::Enter) {
@@ -2667,11 +2710,11 @@ impl eframe::App for App {
         if let Some(p) = dropped.into_iter().next().filter(|_| !reviewing) {
             self.guard(&ctx, Pending::Load(p));
         }
-        if !reviewing && self.loaded.is_some() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D)) {
+        if !reviewing && !self.tabs.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D)) {
             acts.push(Act::Review);
         }
         if !reviewing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            if let Some(at) = self.loaded.as_ref().and_then(|l| l.editing_at()) {
+            if let Some(at) = self.ws().and_then(|l| l.editing_at()) {
                 acts.push(Act::EndEdit { at, commit: true });
             }
             acts.push(Act::Save);
@@ -2694,7 +2737,7 @@ impl eframe::App for App {
         }
         let t = self.theme;
 
-        let suite_stats = self.loaded.as_mut().and_then(|l| {
+        let suite_stats = self.ws_mut().and_then(|l| {
             let mut tests = l.tests();
             if tests.suite().cases.is_empty() {
                 return None;
@@ -2714,7 +2757,7 @@ impl eframe::App for App {
                 .show(ui, |ui| self.nav(ui, suite_stats, &mut acts));
         }
 
-        let shown = self.error.clone().or_else(|| self.loaded.as_ref().and_then(|l| l.error()).map(str::to_string));
+        let shown = self.error.clone().or_else(|| self.ws().and_then(|l| l.error()).map(str::to_string));
         if let Some(e) = shown {
             egui::Panel::top("err").frame(Frame::new().fill(if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) }).inner_margin(Margin::symmetric(20, 8))).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -2722,7 +2765,7 @@ impl eframe::App for App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.add(egui::Button::new(RichText::new(ic::X).color(t.error_text)).frame(false)).clicked() {
                             self.error = None;
-                            if let Some(l) = self.loaded.as_mut() {
+                            if let Some(l) = self.ws_mut() {
                                 l.clear_error();
                             }
                         }
@@ -2731,7 +2774,7 @@ impl eframe::App for App {
             });
         }
 
-        if self.loaded.is_none() {
+        if self.tabs.is_empty() {
             self.empty_view(ui, &mut acts);
             self.palette_ui(&ctx, &mut acts);
             self.help_window(&ctx);
@@ -2741,7 +2784,7 @@ impl eframe::App for App {
 
         egui::Panel::top("header").exact_size(60.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::symmetric(20, 0))).show(ui, |ui| self.header(ui, &mut acts));
 
-        if let Some(v) = self.loaded.as_mut().and_then(|l| l.fix_view()) {
+        if let Some(v) = self.ws_mut().and_then(|l| l.fix_view()) {
             egui::Panel::right("fix_panel").resizable(true).default_size(400.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::same(0))).show(ui, |ui| fix_panel(ui, &t, &v, &mut acts));
         }
 
@@ -2750,9 +2793,9 @@ impl eframe::App for App {
             View::Issues => self.issues_view(ui, &mut acts),
             View::Xml => self.xml_view(ui),
             View::Test => {
-                if let Some(l) = self.loaded.as_mut() {
-                    let selected = l.selected();
-                    test_view(ui, l, selected, &mut self.tester, &t, &mut acts);
+                if let Some(Tab { ws, tester, .. }) = self.tabs.get_mut(self.active) {
+                    let selected = ws.selected();
+                    test_view(ui, ws, selected, tester, &t, &mut acts);
                 }
             }
         }

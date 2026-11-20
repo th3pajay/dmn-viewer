@@ -331,7 +331,7 @@ impl App {
     }
 
     fn state(&self) -> State {
-        let l = self.loaded.as_ref();
+        let l = self.ws();
         State {
             doc: l.is_some(),
             editable: l.is_some_and(|l| l.editable()),
@@ -408,7 +408,7 @@ impl App {
             Cmd::SetChrome(Chrome::Classic) => toggle(i("Layout: menu bar", ic::LIST, "View", true), s.chrome == Chrome::Classic),
             Cmd::SetChrome(Chrome::Palette) => toggle(i("Layout: toolbar and palette", ic::COMMAND, "View", true), s.chrome == Chrome::Palette),
             Cmd::Go(n) => {
-                let name = self.loaded.as_ref().and_then(|l| l.defs().decisions.get(n)).map(|d| if d.name.is_empty() { d.id.clone() } else { d.name.clone() }).unwrap_or_default();
+                let name = self.ws().and_then(|l| l.defs().decisions.get(n)).map(|d| if d.name.is_empty() { d.id.clone() } else { d.name.clone() }).unwrap_or_default();
                 toggle(info_of(Cow::Owned(name), ic::DECISION, "Go to", s.doc), s.doc && self.decision() == n)
             }
             Cmd::PrevIssue => i("Previous issue", ic::UP, "Go", s.doc && s.table),
@@ -451,7 +451,7 @@ impl App {
 
     pub fn run_cmd(&mut self, ctx: &egui::Context, c: Cmd) {
         self.shell.notice = None;
-        if let Some(l) = self.loaded.as_mut() {
+        if let Some(l) = self.ws_mut() {
             l.clear_notice();
             l.flush_editing();
         }
@@ -469,7 +469,7 @@ impl App {
             }
             Cmd::Reload => act(self, Act::Reload),
             Cmd::Revert => {
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.discard();
                 }
             }
@@ -481,7 +481,7 @@ impl App {
             Cmd::Undo => act(self, Act::Undo),
             Cmd::Redo => act(self, Act::Redo),
             Cmd::Find => {
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.set_view(View::Rules);
                 }
                 self.shell.focus_filter = true;
@@ -496,17 +496,17 @@ impl App {
                     Cmd::MoveUp => RuleOp::MoveUp,
                     _ => RuleOp::MoveDown,
                 };
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.rule_op(op);
                 }
             }
             Cmd::CopyRule => {
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.copy_rule();
                 }
             }
             Cmd::PasteRule => {
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.paste_rule();
                 }
             }
@@ -528,12 +528,12 @@ impl App {
             }
             Cmd::Go(n) => act(self, Act::Decision(n)),
             Cmd::PrevIssue => {
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.step_issue(false);
                 }
             }
             Cmd::NextIssue => {
-                if let Some(l) = self.loaded.as_mut() {
+                if let Some(l) = self.ws_mut() {
                     l.step_issue(true);
                 }
             }
@@ -541,7 +541,7 @@ impl App {
             Cmd::ResetSkipped => act(self, Act::FixResetSkipped),
             Cmd::RunTests => act(self, Act::View(View::Test)),
             Cmd::CopyReport => {
-                if let Some(l) = &self.loaded {
+                if let Some(l) = self.ws() {
                     ctx.copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
                     self.shell.notice = Some("Issues report copied".into());
                 }
@@ -553,13 +553,13 @@ impl App {
     }
 
     fn save_as(&mut self) {
-        let Some(l) = self.loaded.as_ref().filter(|l| l.editable()) else { return };
+        let Some(l) = self.ws().filter(|l| l.editable()) else { return };
         let mut dialog = rfd::FileDialog::new().add_filter("DMN", &["dmn", "xml"]).set_file_name(file_name(l.path()));
         if let Some(dir) = l.path().parent() {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else { return };
-        let Some(l) = self.loaded.as_mut() else { return };
+        let Some(l) = self.ws_mut() else { return };
         if l.save_as(path.clone()) {
             self.shell.notice = Some(format!("Saved as {}", file_name(&path)));
             self.remember(path);
@@ -567,7 +567,7 @@ impl App {
     }
 
     fn export(&mut self, f: Format) {
-        let Some((name, text)) = self.loaded.as_ref().and_then(|l| l.export(f)) else { return };
+        let Some((name, text)) = self.ws().and_then(|l| l.export(f)) else { return };
         let safe: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' }).collect();
         let Some(path) = rfd::FileDialog::new().add_filter(f.label(), &[f.extension()]).set_file_name(format!("{safe}.{}", f.extension())).save_file() else { return };
         match std::fs::write(&path, text) {
@@ -705,7 +705,7 @@ impl App {
 
     fn menu_go(&self, ui: &mut egui::Ui, s: &State, acts: &mut Vec<Act>) {
         ui.set_min_width(250.0);
-        let n = self.loaded.as_ref().map_or(0, |l| l.defs().decisions.len());
+        let n = self.ws().map_or(0, |l| l.defs().decisions.len());
         if n == 0 {
             ui.add_enabled(false, egui::Label::new("No file open"));
         }
@@ -794,7 +794,7 @@ impl App {
     }
 
     pub fn notice_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(text) = self.loaded.as_ref().and_then(|l| l.notice()).map(str::to_string).or_else(|| self.shell.notice.clone()) else { return };
+        let Some(text) = self.ws().and_then(|l| l.notice()).map(str::to_string).or_else(|| self.shell.notice.clone()) else { return };
         let t = self.theme;
         let mut dismissed = false;
         egui::Panel::top("notice").frame(Frame::new().fill(t.accent_soft).inner_margin(Margin::symmetric(20, 6))).show(ui, |ui| {
@@ -807,14 +807,14 @@ impl App {
         });
         if dismissed {
             self.shell.notice = None;
-            if let Some(l) = self.loaded.as_mut() {
+            if let Some(l) = self.ws_mut() {
                 l.clear_notice();
             }
         }
     }
 
     fn palette_items(&self, s: &State, query: &str) -> Vec<(Cmd, Info, i32)> {
-        let n_decisions = self.loaded.as_ref().map_or(0, |l| l.defs().decisions.len());
+        let n_decisions = self.ws().map_or(0, |l| l.defs().decisions.len());
         let dynamic = (0..n_decisions).map(Cmd::Go).chain((0..self.settings.recent.len()).map(Cmd::OpenRecent));
         let mut items: Vec<(Cmd, Info, i32)> = STATIC
             .iter()
@@ -913,7 +913,7 @@ impl App {
     pub fn replace_window(&mut self, ctx: &egui::Context) {
         let Some(mut f) = self.shell.replace.take() else { return };
         let t = self.theme;
-        let matches = self.loaded.as_ref().map_or(0, |l| l.replace_count(&f.find, &f.with, f.case));
+        let matches = self.ws().map_or(0, |l| l.replace_count(&f.find, &f.with, f.case));
         let mut open = true;
         let mut apply = false;
         egui::Window::new("Find and replace").collapsible(false).resizable(false).open(&mut open).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
@@ -941,7 +941,7 @@ impl App {
                 });
             });
         });
-        if apply && self.loaded.as_mut().is_some_and(|l| l.replace_all(&f.find, &f.with, f.case)) {
+        if apply && self.ws_mut().is_some_and(|l| l.replace_all(&f.find, &f.with, f.case)) {
             open = false;
         }
         if open {
