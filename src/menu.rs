@@ -120,6 +120,8 @@ pub enum Cmd {
     CopyRule,
     PasteRule,
     Show(View),
+    Note,
+    Notes,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -171,6 +173,8 @@ const STATIC: &[Cmd] = &[
     Cmd::Show(View::Issues),
     Cmd::Show(View::Test),
     Cmd::Show(View::Xml),
+    Cmd::Notes,
+    Cmd::Note,
     Cmd::ZoomIn,
     Cmd::ZoomOut,
     Cmd::ZoomReset,
@@ -227,6 +231,8 @@ fn keys(c: Cmd) -> Option<Bind> {
         Cmd::Show(View::Issues) => Bind::Own(ctrl, Key::Num2),
         Cmd::Show(View::Test) => Bind::Own(ctrl, Key::Num3),
         Cmd::Show(View::Xml) => Bind::Own(ctrl, Key::Num4),
+        Cmd::Notes => Bind::Own(ctrl, Key::Num5),
+        Cmd::Note => Bind::Own(ctrl_shift, Key::N),
         Cmd::ZoomIn => Bind::Text("Ctrl++"),
         Cmd::ZoomOut => Bind::Text("Ctrl+-"),
         Cmd::ZoomReset => Bind::Text("Ctrl+0"),
@@ -265,6 +271,7 @@ pub struct State {
     skipped: usize,
     has_clip: bool,
     view: View,
+    notes: bool,
     dark: bool,
     compact: bool,
     sidebar: bool,
@@ -381,6 +388,7 @@ impl App {
             fixable: l.map_or(0, |l| l.fixable_count()),
             skipped: l.map_or(0, |l| l.skipped_count()),
             has_clip: l.is_some_and(|l| l.has_clip()),
+            notes: self.show_notes,
             view: self.view(),
             dark: self.theme.dark,
             compact: self.settings.compact,
@@ -440,8 +448,10 @@ impl App {
                     View::Test => ("Test", ic::FLASK),
                     View::Xml => ("XML", ic::CODE),
                 };
-                toggle(i(label, icon, "View", s.doc), s.view == v)
+                toggle(i(label, icon, "View", s.doc), s.view == v && !s.notes)
             }
+            Cmd::Notes => toggle(i("Notes", ic::NOTE, "View", s.doc), s.notes),
+            Cmd::Note => i("Edit decision note", ic::NOTE, "Edit", s.doc && !s.modal),
             Cmd::ZoomIn => i("Zoom in", ic::ZOOM_IN, "View", true),
             Cmd::ZoomOut => i("Zoom out", ic::ZOOM_OUT, "View", true),
             Cmd::ZoomReset => i("Reset zoom", ic::SEARCH, "View", true),
@@ -579,6 +589,8 @@ impl App {
                 }
             }
             Cmd::Show(v) => act(self, Act::View(v)),
+            Cmd::Notes => act(self, Act::Notes),
+            Cmd::Note => act(self, Act::Memo),
             Cmd::ZoomIn => ctx.set_zoom_factor((ctx.zoom_factor() * 1.1).min(3.0)),
             Cmd::ZoomOut => ctx.set_zoom_factor((ctx.zoom_factor() / 1.1).max(0.5)),
             Cmd::ZoomReset => ctx.set_zoom_factor(1.0),
@@ -629,7 +641,10 @@ impl App {
         let Some(path) = dialog.save_file() else { return };
         let Some(tab) = self.tab_mut() else { return };
         if tab.ws.as_mut().is_some_and(|ws| ws.save_as(path.clone())) {
+            let old = tab.key.clone();
             tab.relabel();
+            let (key, shown) = (tab.key.clone(), tab.path.clone());
+            self.memos.rekey(&old, &key, &shown);
             self.persist_tabs();
             self.shell.notice = Some(format!("Saved as {}", file_name(&path)));
             self.remember(path);
@@ -739,7 +754,7 @@ impl App {
             self.item(ui, s, c, acts);
         }
         ui.separator();
-        for c in [Cmd::Find, Cmd::Replace] {
+        for c in [Cmd::Find, Cmd::Replace, Cmd::Note] {
             self.item(ui, s, c, acts);
         }
         ui.separator();
@@ -757,6 +772,7 @@ impl App {
         for v in [View::Rules, View::Issues, View::Test, View::Xml] {
             self.item(ui, s, Cmd::Show(v), acts);
         }
+        self.item(ui, s, Cmd::Notes, acts);
         ui.separator();
         for c in [Cmd::ZoomIn, Cmd::ZoomOut, Cmd::ZoomReset] {
             self.item(ui, s, c, acts);

@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod memo;
 mod menu;
 mod tabs;
 
@@ -61,6 +62,7 @@ mod ic {
     pub const UP: &str = "\u{E52E}";
     pub const DOWN: &str = "\u{E518}";
     pub const ROW_ABOVE: &str = "\u{E52E}";
+    pub const NOTE: &str = "\u{E348}";
 }
 
 #[derive(Clone, Copy)]
@@ -320,7 +322,7 @@ fn dot(ui: &mut egui::Ui, color: Color32, size: f32) {
     ui.painter().circle_filled(r.center(), size / 2.0, color);
 }
 
-fn nav_item(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str, badge: Option<(String, Color32, Color32)>, active: bool) -> egui::Response {
+fn nav_item(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str, badge: Option<(String, Color32, Color32)>, active: bool, mark: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     let p = ui.painter();
     if active {
@@ -331,14 +333,34 @@ fn nav_item(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str, badge: Option
     let fg = if active { t.text } else { t.muted };
     p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, icon, FontId::proportional(16.0), if active { t.accent } else { t.muted });
     p.text(rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, label, FontId::new(13.5, if active { bold_family() } else { FontFamily::Proportional }), fg);
+    let mut right = rect.right() - 8.0;
     if let Some((text, bg, color)) = badge {
         let galley = p.layout_no_wrap(text, FontId::new(11.0, bold_family()), color);
         let w = galley.size().x + 14.0;
-        let r = egui::Rect::from_center_size(egui::pos2(rect.right() - 8.0 - w / 2.0, rect.center().y), vec2(w, 18.0));
+        let r = egui::Rect::from_center_size(egui::pos2(right - w / 2.0, rect.center().y), vec2(w, 18.0));
         p.rect_filled(r, CornerRadius::same(9), bg);
         p.galley(r.center() - galley.size() / 2.0, galley, color);
+        right = r.left() - 4.0;
+    }
+    if mark {
+        p.text(egui::pos2(right, rect.center().y), Align2::RIGHT_CENTER, ic::NOTE, FontId::proportional(14.0), t.warn_text);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn memo_preview(ui: &mut egui::Ui, t: &Theme, f: &memo::File, ws: Option<&Workspace>) {
+    ui.separator();
+    ui.set_max_width(320.0);
+    for m in f.memos.iter().take(4) {
+        let name = ws.and_then(|l| l.defs().decisions.iter().find(|d| d.id == *m.id)).map_or(&*m.id, |d| if d.name.is_empty() { d.id.as_str() } else { d.name.as_str() });
+        ui.horizontal_top(|ui| {
+            ui.label(RichText::new(ic::NOTE).color(t.warn_text));
+            ui.label(RichText::new(format!("{name}: {}", m.text.lines().next().unwrap_or_default())).color(t.text));
+        });
+    }
+    if f.memos.len() > 4 {
+        ui.label(RichText::new(format!("and {} more", f.memos.len() - 4)).color(t.muted));
+    }
 }
 
 fn group_label(ui: &mut egui::Ui, t: &Theme, text: &str) {
@@ -379,6 +401,23 @@ impl Quit {
         self.picked = self.rows.iter().filter(|r| r.1).count();
         self.label = tabs::quit_label(self.picked, self.rows.len());
     }
+}
+
+struct MemoEdit {
+    key: PathBuf,
+    path: PathBuf,
+    id: Arc<str>,
+    title: String,
+    text: String,
+    focus: bool,
+}
+
+struct MemoBar {
+    revision: u64,
+    uid: u64,
+    decision: usize,
+    width: f32,
+    galley: Arc<egui::Galley>,
 }
 
 enum Quitting {
@@ -535,6 +574,10 @@ enum Act {
     FixClose,
     FixReview,
     FixResetSkipped,
+    Memo,
+    MemoOpen,
+    MemoJump(PathBuf, Arc<str>),
+    Notes,
     Cmd(menu::Cmd),
 }
 
@@ -627,6 +670,13 @@ struct App {
     quit: Option<Quit>,
     allow_close: bool,
     review: Option<Review>,
+    memos: memo::Memos,
+    memo: Option<MemoEdit>,
+    memo_anchor: egui::Rect,
+    memo_bar: Option<MemoBar>,
+    memo_quiet: bool,
+    memo_tick: bool,
+    show_notes: bool,
     settings: menu::Settings,
     shell: menu::Shell,
 }
@@ -721,6 +771,13 @@ impl App {
             quit: None,
             allow_close: false,
             review: None,
+            memos: memo::Memos::default(),
+            memo: None,
+            memo_anchor: egui::Rect::NOTHING,
+            memo_bar: None,
+            memo_quiet: false,
+            memo_tick: false,
+            show_notes: false,
             settings: menu::Settings::load(),
             shell: menu::Shell::default(),
         };
@@ -974,8 +1031,9 @@ impl App {
     fn guard(&mut self, p: Pending) {
         let dirty = match &p {
             Pending::Reload => self.ws().is_some_and(|l| l.dirty()).then_some(self.active),
-            Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(Tab::dirty).then_some(*i),
+            Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(|t| t.dirty() || (!self.memo_quiet && self.memos.count(&t.key) > 0)).then_some(*i),
         };
+        self.memo_tick = false;
         match dirty {
             Some(i) => {
                 self.activate(i);
@@ -1106,20 +1164,36 @@ impl App {
     fn pending_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let t = self.theme;
-        let file = self.tab().map_or_else(Default::default, |t| t.label.clone());
+        let (file, dirty, notes) = self.tab().map_or_else(Default::default, |tab| (tab.label.clone(), tab.dirty(), self.memos.count(&tab.key)));
+        let keep = (matches!(p, Pending::CloseTab(_)) && notes > 0)
+            .then(|| format!("{notes} local note{} stay in memory and come back if you reopen this file before the app closes.", if notes == 1 { "" } else { "s" }));
+        let tick = &mut self.memo_tick;
         let mut choice = None;
         egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.label(bold("Unsaved changes", 15.0).color(t.text));
+            ui.set_width(380.0);
+            ui.label(bold(if dirty { "Unsaved changes".to_string() } else { format!("Close {file}?") }, 15.0).color(t.text));
             ui.add_space(4.0);
-            ui.label(RichText::new(format!("{file} has changes that are not saved.")).color(t.muted));
+            if dirty {
+                ui.label(RichText::new(format!("{file} has changes that are not saved.")).color(t.muted));
+            }
+            if let Some(k) = &keep {
+                ui.label(RichText::new(k.as_str()).color(t.muted));
+            }
+            if !dirty {
+                ui.add_space(6.0);
+                ui.checkbox(tick, "Don't ask again until the app closes");
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if button(ui, &t, ic::SAVE, "Save", true).clicked() {
-                    choice = Some("save");
-                }
-                if button(ui, &t, ic::TRASH, "Discard", false).clicked() {
-                    choice = Some("discard");
+                if dirty {
+                    if button(ui, &t, ic::SAVE, "Save", true).clicked() {
+                        choice = Some("save");
+                    }
+                    if button(ui, &t, ic::TRASH, "Discard", false).clicked() {
+                        choice = Some("discard");
+                    }
+                } else if button(ui, &t, ic::X, "Close tab", true).clicked() {
+                    choice = Some("close");
                 }
                 if button(ui, &t, ic::X, "Cancel", false).clicked() {
                     choice = Some("cancel");
@@ -1138,9 +1212,191 @@ impl App {
                 }
                 self.run(p);
             }
+            Some("close") => {
+                self.memo_quiet |= self.memo_tick;
+                self.pending = None;
+                self.run(p);
+            }
             Some("cancel") => self.pending = None,
             _ => {}
         }
+    }
+
+    fn current_memo(&self) -> Option<&str> {
+        let tab = self.tab()?;
+        let l = tab.ws.as_ref()?;
+        self.memos.get(&tab.key, &l.defs().decisions.get(l.decision())?.id)
+    }
+
+    fn memo_toggle(&mut self, keep_open: bool) {
+        let Some(Tab { ws: Some(l), key, path, .. }) = self.tabs.get(self.active) else { return };
+        let Some(d) = l.defs().decisions.get(l.decision()) else { return };
+        if let Some(m) = &self.memo
+            && m.key == *key
+            && *m.id == *d.id
+        {
+            if !keep_open {
+                self.memo = None;
+            }
+            return;
+        }
+        let text = self.memos.get(key, &d.id).unwrap_or_default().to_string();
+        let title = if d.name.is_empty() { d.id.clone() } else { d.name.clone() };
+        self.memo = Some(MemoEdit { key: key.clone(), path: path.clone(), id: d.id.as_str().into(), title, text, focus: true });
+        self.show_notes = false;
+    }
+
+    fn memo_jump(&mut self, key: PathBuf, id: &str) {
+        match self.tabs.iter().position(|t| t.key == key) {
+            Some(i) => self.activate(i),
+            None => {
+                let path = self.memos.file(&key).map_or_else(|| key.clone(), |f| f.path.clone());
+                self.load(path);
+            }
+        }
+        let Some(Tab { ws: Some(l), key: k, .. }) = self.tabs.get_mut(self.active) else { return };
+        if *k != key {
+            return;
+        }
+        if let Some(d) = l.defs().decisions.iter().position(|d| d.id == id) {
+            l.set_decision(d);
+        }
+        l.set_view(View::Rules);
+        self.show_notes = false;
+    }
+
+    fn memo_popover(&mut self, ctx: &egui::Context) {
+        let App { memo, memos, tabs, active, theme: t, memo_anchor, .. } = self;
+        let Some(m) = memo.as_mut() else { return };
+        let current = tabs.get(*active).and_then(|tab| Some((&tab.key, tab.ws.as_ref()?))).and_then(|(k, l)| Some((k, &l.defs().decisions.get(l.decision())?.id)));
+        if !current.is_some_and(|(k, id)| *k == m.key && **id == *m.id) {
+            *memo = None;
+            return;
+        }
+        let width = 340.0;
+        let screen = ctx.content_rect();
+        let pos = egui::pos2((memo_anchor.right() - width).clamp(screen.left() + 8.0, (screen.right() - width - 8.0).max(screen.left() + 8.0)), memo_anchor.bottom() + 6.0);
+        let mut close = false;
+        let mut changed = false;
+        let area = egui::Area::new(egui::Id::new("memo_popover")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            Frame::popup(ui.style()).inner_margin(Margin::same(12)).show(ui, |ui| {
+                ui.set_width(width - 24.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::NOTE).color(t.warn_text));
+                    ui.add(egui::Label::new(bold(m.title.as_str(), 13.5).color(t.text)).truncate());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new(ic::X).color(t.muted)).frame(false)).on_hover_text("Close (Esc)").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                let edit = ui.add(
+                    egui::TextEdit::multiline(&mut m.text)
+                        .hint_text("Note for this decision. Only you see it, it isn't saved to the file, and it's gone when the app closes.")
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY),
+                );
+                if std::mem::take(&mut m.focus) {
+                    edit.request_focus();
+                }
+                changed = edit.changed();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Kept until the app closes").size(11.5).color(t.faint));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if !m.text.is_empty() && small_button(ui, t, ic::TRASH, "Delete").clicked() {
+                            m.text.clear();
+                            changed = true;
+                            close = true;
+                        }
+                    });
+                });
+            });
+        });
+        if changed {
+            memos.set(&m.key, &m.path, &m.id, &m.text);
+        }
+        let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !memo_anchor.contains(p)));
+        if close || outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            *memo = None;
+        }
+    }
+
+    fn memo_strip(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        let App { memos, tabs, active, theme: t, memo_bar, .. } = self;
+        let Some(tab) = tabs.get(*active) else { return };
+        let Some(l) = tab.ws.as_ref() else { return };
+        let decision = l.decision();
+        let Some(d) = l.defs().decisions.get(decision) else { return };
+        let Some(text) = memos.get(&tab.key, &d.id) else { return };
+        let width = (ui.available_width() - 26.0).max(40.0).floor();
+        let fresh = memo_bar.as_ref().is_some_and(|b| b.revision == memos.revision() && b.uid == tab.uid && b.decision == decision && b.width == width);
+        if !fresh {
+            let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat::simple(FontId::proportional(12.5), Color32::PLACEHOLDER));
+            job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 3, break_anywhere: false, overflow_character: Some('\u{2026}') };
+            *memo_bar = Some(MemoBar { revision: memos.revision(), uid: tab.uid, decision, width, galley: ui.painter().layout_job(job) });
+        }
+        let Some(bar) = memo_bar.as_ref() else { return };
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), bar.galley.size().y.max(16.0)), Sense::click());
+        let p = ui.painter();
+        p.text(egui::pos2(rect.left(), rect.top() + 1.0), Align2::LEFT_TOP, ic::NOTE, FontId::proportional(14.0), t.warn_text);
+        p.galley(egui::pos2(rect.left() + 22.0, rect.top()), bar.galley.clone(), t.warn_text);
+        if resp.on_hover_text("Local note. Click to edit").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            acts.push(Act::MemoOpen);
+        }
+    }
+
+    fn notes_view(&self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        let t = &self.theme;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            Frame::new().inner_margin(Margin::symmetric(24, 18)).show(ui, |ui| {
+                ui.label(bold("Notes", 16.0).color(t.text));
+                ui.label(RichText::new("Only on this machine. Never written to a file, gone when the app closes.").color(t.muted));
+                ui.add_space(12.0);
+                if self.memos.total() == 0 {
+                    ui.label(RichText::new("No notes yet. Use Add note in the header (Ctrl+Shift+N) to jot something about a decision.").color(t.faint));
+                    return;
+                }
+                let open = self.tabs.iter().filter_map(|tab| self.memos.file(&tab.key).map(|f| (f, Some(tab))));
+                let closed = self.memos.files().iter().filter(|f| !self.tabs.iter().any(|tab| tab.key == f.key)).map(|f| (f, None));
+                for (f, tab) in open.chain(closed) {
+                    ui.horizontal(|ui| {
+                        let label = tab.map_or_else(|| tabs::label(&f.path), |tab| tab.label.clone());
+                        ui.label(bold(label.as_ref(), 13.5).color(t.text)).on_hover_text(f.path.display().to_string());
+                        if tab.is_none() {
+                            pill(ui, "closed, click a note to reopen", t.chip, t.muted);
+                        }
+                    });
+                    ui.add_space(4.0);
+                    let defs = tab.and_then(|tab| tab.ws.as_ref()).map(Workspace::defs);
+                    for memo in &f.memos {
+                        let dec = defs.and_then(|defs| defs.decisions.iter().find(|d| d.id == *memo.id));
+                        let name = dec.map_or(&*memo.id, |d| if d.name.is_empty() { d.id.as_str() } else { d.name.as_str() });
+                        let card = Frame::new().fill(t.surface).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(ic::NOTE).color(t.warn_text));
+                                ui.label(bold(name, 13.0).color(t.text));
+                                if defs.is_some() && dec.is_none() {
+                                    ui.label(RichText::new("decision not in the file any more").size(11.5).color(t.faint));
+                                }
+                            });
+                            ui.add(egui::Label::new(RichText::new(memo.text.as_str()).color(t.muted)).wrap_mode(TextWrapMode::Wrap));
+                        });
+                        let resp = card.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.hovered() {
+                            ui.painter().rect_stroke(resp.rect, CornerRadius::same(8), Stroke::new(1.0, t.accent), StrokeKind::Inside);
+                        }
+                        if resp.clicked() {
+                            acts.push(Act::MemoJump(f.key.clone(), memo.id.clone()));
+                        }
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(10.0);
+                }
+            });
+        });
     }
 
     fn quit_modal(&mut self, ctx: &egui::Context) {
@@ -1155,9 +1411,9 @@ impl App {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(if q.rows.len() == 1 {
-                    "This file has changes that are not saved. Unticked files are discarded."
+                    "This file has changes that are not saved. Unticked files are discarded. Local notes are never saved."
                 } else {
-                    "These files have changes that are not saved. Unticked files are discarded."
+                    "These files have changes that are not saved. Unticked files are discarded. Local notes are never saved."
                 })
                 .color(t.muted),
             );
@@ -1306,6 +1562,7 @@ impl App {
                     }
                 }
                 Act::View(v) => {
+                    self.show_notes = false;
                     if let Some(l) = self.ws_mut() {
                         l.set_view(v);
                     }
@@ -1322,11 +1579,19 @@ impl App {
                     }
                 }
                 Act::Decision(d) => {
+                    self.show_notes = false;
                     if let Some(l) = self.ws_mut() {
                         l.set_decision(d);
                     }
                 }
                 Act::Open => self.open_dialog(),
+                Act::Memo => self.memo_toggle(false),
+                Act::MemoOpen => self.memo_toggle(true),
+                Act::MemoJump(key, id) => self.memo_jump(key, &id),
+                Act::Notes => {
+                    self.show_notes = true;
+                    self.memo = None;
+                }
                 Act::Tab(i) => self.activate(i),
                 Act::StepTab { forward } => self.activate(tabs::step(self.active, self.tabs.len(), forward)),
                 Act::CloseTab(i) => self.guard(Pending::CloseTab(i)),
@@ -1446,7 +1711,9 @@ impl App {
                         if dirty {
                             x += 13.0;
                         }
-                        let title = tab.title(ui, (close_rect.left() - 4.0 - x).max(0.0).floor());
+                        let notes = self.memos.count(&tab.key);
+                        let end = close_rect.left() - 4.0 - if notes > 0 { 15.0 } else { 0.0 };
+                        let title = tab.title(ui, (end - x).max(0.0).floor());
                         let p = ui.painter();
                         if on {
                             p.rect(rect, corner, t.surface, Stroke::new(1.0, t.line), StrokeKind::Inside);
@@ -1458,6 +1725,9 @@ impl App {
                             p.circle_filled(egui::pos2(rect.left() + 14.5, rect.center().y), 3.5, t.accent);
                         }
                         p.galley(egui::pos2(x, rect.center().y - title.size().y / 2.0), title, if on { t.text } else { t.muted });
+                        if notes > 0 {
+                            p.text(egui::pos2(close_rect.left() - 3.0, rect.center().y), Align2::RIGHT_CENTER, ic::NOTE, FontId::proportional(13.0), t.warn_text);
+                        }
                         if on || hovered {
                             if close.hovered() {
                                 p.rect_filled(close_rect, CornerRadius::same(4), t.chip);
@@ -1491,8 +1761,12 @@ impl App {
                             acts.push(Act::TabDropped);
                         }
                         close.on_hover_text("Close (Ctrl+W, or middle-click the tab)");
+                        let memos = &self.memos;
                         resp.on_hover_ui(|ui| {
                             ui.label(tab.path.display().to_string());
+                            if let Some(f) = memos.file(&tab.key) {
+                                memo_preview(ui, &t, f, tab.ws.as_ref());
+                            }
                         });
                     }
                 });
@@ -1546,6 +1820,7 @@ impl App {
         ui.add_space(14.0);
         if let Some(l) = self.ws() {
             group_label(ui, t, "Decisions");
+            let file = self.tab().and_then(|tab| self.memos.file(&tab.key));
             for (i, d) in l.defs().decisions.iter().enumerate() {
                 let errs = l.issues().iter().filter(|x| x.decision == Some(i) && x.severity == Severity::Error).count();
                 let count = match &d.logic {
@@ -1562,7 +1837,15 @@ impl App {
                     (count, t.chip, t.muted)
                 };
                 let name = if d.name.is_empty() { &d.id } else { &d.name };
-                if nav_item(ui, t, ic::DECISION, name, Some(badge), active).clicked() {
+                let note = file.and_then(|f| f.get(&d.id));
+                let mut resp = nav_item(ui, t, ic::DECISION, name, Some(badge), active, note.is_some());
+                if let Some(text) = note {
+                    resp = resp.on_hover_ui(|ui| {
+                        ui.set_max_width(300.0);
+                        ui.label(RichText::new(text).color(t.text));
+                    });
+                }
+                if resp.clicked() {
                     acts.push(Act::Decision(i));
                 }
             }
@@ -1575,9 +1858,16 @@ impl App {
             for (v, icon, label, badge) in
                 [(View::Rules, ic::TABLE, "Rules", None), (View::Issues, ic::WARNING, "Issues", Some(issue_badge)), (View::Test, ic::FLASK, "Test", test_badge), (View::Xml, ic::CODE, "XML", None)]
             {
-                if nav_item(ui, t, icon, label, badge, self.view() == v).clicked() {
+                if nav_item(ui, t, icon, label, badge, !self.show_notes && self.view() == v, false).clicked() {
                     acts.push(Act::View(v));
                 }
+            }
+            let total = self.memos.total();
+            if nav_item(ui, t, ic::NOTE, "Notes", (total > 0).then(|| (total.to_string(), t.warn.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.warn_text)), self.show_notes, false)
+                .on_hover_text("Local notes from every tab (Ctrl+5)")
+                .clicked()
+            {
+                acts.push(Act::Notes);
             }
             ui.add_space(12.0);
         }
@@ -1585,7 +1875,7 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(Tab { ws: Some(l), rules, label: file, .. }) = self.tabs.get_mut(self.active) else { return };
+        let Some(Tab { ws: Some(l), rules, label: file, key, .. }) = self.tabs.get_mut(self.active) else { return };
         let l = &*l;
         let decision = l.decision();
         let view = l.view();
@@ -1658,6 +1948,15 @@ impl App {
                 }
                 if button(ui, &t, ic::PLAY, "Run tests", true).clicked() {
                     acts.push(Act::View(View::Test));
+                }
+                if let Some(d) = dec {
+                    let has = self.memos.get(key, &d.id).is_some();
+                    let r = button(ui, &t, ic::NOTE, if has { "Note" } else { "Add note" }, false)
+                        .on_hover_text("Local note for this decision. Only on this machine, gone when the app closes (Ctrl+Shift+N)");
+                    self.memo_anchor = r.rect;
+                    if r.clicked() {
+                        acts.push(Act::Memo);
+                    }
                 }
                 if fixing {
                     pill(ui, "Fixing: the table is read-only", t.warn.gamma_multiply(if t.dark { 0.25 } else { 0.15 }), t.warn_text);
@@ -3169,7 +3468,7 @@ impl eframe::App for App {
         if !reviewing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
             acts.push(Act::Reload);
         }
-        if !reviewing && self.selected().is_some() && ctx.memory(|m| m.focused().is_none()) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if !reviewing && self.memo.is_none() && self.selected().is_some() && ctx.memory(|m| m.focused().is_none()) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             acts.push(Act::Deselect);
         }
         let t = self.theme;
@@ -3228,12 +3527,18 @@ impl eframe::App for App {
 
         egui::Panel::top("header").exact_size(60.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::symmetric(20, 0))).show(ui, |ui| self.header(ui, &mut acts));
 
+        if !self.show_notes && self.memos.total() > 0 && self.current_memo().is_some() {
+            let fill = t.warn.gamma_multiply(if t.dark { 0.18 } else { 0.12 });
+            egui::Panel::top("memo_bar").frame(Frame::new().fill(fill).inner_margin(Margin::symmetric(20, 8))).show(ui, |ui| self.memo_strip(ui, &mut acts));
+        }
+
         if let Some(v) = self.ws_mut().and_then(|l| l.fix_view()) {
             egui::Panel::right("fix_panel").resizable(true).default_size(400.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::same(0))).show(ui, |ui| fix_panel(ui, &t, &v, &mut acts));
         }
 
         let uid = self.tab().map_or(0, |tab| tab.uid);
         ui.push_id(uid, |ui| match self.view() {
+            _ if self.show_notes => self.notes_view(ui, &mut acts),
             View::Rules => self.rules_view(ui, &mut acts),
             View::Issues => self.issues_view(ui, &mut acts),
             View::Xml => self.xml_view(ui),
@@ -3252,6 +3557,7 @@ impl eframe::App for App {
         self.review_modal(&ctx);
         self.pending_modal(&ctx);
         self.quit_modal(&ctx);
+        self.memo_popover(&ctx);
     }
 }
 
