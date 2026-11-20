@@ -37,7 +37,11 @@ pub struct Settings {
     pub chrome: Chrome,
     pub compact: bool,
     pub recent: Vec<PathBuf>,
+    pub open: Vec<PathBuf>,
+    pub active: usize,
 }
+
+const OPEN_MAX: usize = 64;
 
 fn settings_path() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("XDG_CONFIG_HOME")).map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
@@ -57,6 +61,8 @@ impl Settings {
                 Some(("chrome", v)) => s.chrome = Chrome::parse(v).unwrap_or_default(),
                 Some(("compact", v)) => s.compact = v.trim() == "1",
                 Some(("recent", v)) if !v.is_empty() && s.recent.len() < RECENT_MAX => s.recent.push(PathBuf::from(v)),
+                Some(("open", v)) if !v.is_empty() && s.open.len() < OPEN_MAX => s.open.push(PathBuf::from(v)),
+                Some(("active", v)) => s.active = v.trim().parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -68,10 +74,16 @@ impl Settings {
         for p in &self.recent {
             out.push_str(&format!("recent={}\n", p.display()));
         }
+        for p in self.open.iter().take(OPEN_MAX) {
+            out.push_str(&format!("open={}\n", p.display()));
+        }
+        if !self.open.is_empty() {
+            out.push_str(&format!("active={}\n", self.active));
+        }
         out
     }
 
-    fn save(&self) {
+    pub fn save(&self) {
         let Some(path) = settings_path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -404,7 +416,7 @@ impl App {
             Cmd::Tab(n) => {
                 let tab = self.tabs.get(n);
                 Info {
-                    tip: tab.map(|t| t.ws.path().display().to_string()),
+                    tip: tab.map(|t| t.path.display().to_string()),
                     ..toggle(info_of(Cow::Owned(tab.map_or_else(String::new, |t| t.label.to_string())), ic::NEW, "Tabs", tab.is_some() && !s.modal), n == self.active)
                 }
             }
@@ -616,8 +628,9 @@ impl App {
         }
         let Some(path) = dialog.save_file() else { return };
         let Some(tab) = self.tab_mut() else { return };
-        if tab.ws.save_as(path.clone()) {
+        if tab.ws.as_mut().is_some_and(|ws| ws.save_as(path.clone())) {
             tab.relabel();
+            self.persist_tabs();
             self.shell.notice = Some(format!("Saved as {}", file_name(&path)));
             self.remember(path);
         }
@@ -1079,11 +1092,28 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let s = Settings { chrome: Chrome::Palette, compact: true, recent: vec![PathBuf::from("a.dmn"), PathBuf::from("b dir/c.dmn")] };
+        let s = Settings {
+            chrome: Chrome::Palette,
+            compact: true,
+            recent: vec![PathBuf::from("a.dmn"), PathBuf::from("b dir/c.dmn")],
+            open: vec![PathBuf::from("x.dmn"), PathBuf::from("y dir/z.dmn")],
+            active: 1,
+        };
         let back = Settings::parse(&s.render());
         assert_eq!(back.chrome, Chrome::Palette);
         assert!(back.compact);
         assert_eq!(back.recent, s.recent);
+        assert_eq!(back.open, s.open);
+        assert_eq!(back.active, 1);
+    }
+
+    #[test]
+    fn open_tabs_are_capped_and_absent_when_none() {
+        let mut s = Settings { open: (0..OPEN_MAX + 5).map(|n| PathBuf::from(format!("{n}.dmn"))).collect(), ..Settings::default() };
+        assert_eq!(Settings::parse(&s.render()).open.len(), OPEN_MAX);
+        s.open.clear();
+        let text = s.render();
+        assert!(!text.contains("open=") && !text.contains("active="));
     }
 
     #[test]

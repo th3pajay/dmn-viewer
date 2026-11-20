@@ -486,6 +486,8 @@ enum Act {
     Tab(usize),
     StepTab { forward: bool },
     CloseTab(usize),
+    MoveTab { from: usize, to: usize },
+    TabDropped,
     ToggleDark,
     ToggleLangs,
     Deselect,
@@ -538,9 +540,10 @@ struct RuleCache {
 struct Tab {
     uid: u64,
     key: PathBuf,
+    path: PathBuf,
     label: Arc<str>,
     title: Option<(f32, f32, Arc<egui::Galley>)>,
-    ws: Workspace,
+    ws: Option<Workspace>,
     tester: Tester,
     rules: RuleCache,
     sev_filter: Option<Severity>,
@@ -549,12 +552,25 @@ struct Tab {
 
 impl Tab {
     fn new(ws: Workspace, key: PathBuf, uid: u64) -> Tab {
-        Tab { uid, key, label: tabs::label(ws.path()), title: None, ws, tester: Tester::default(), rules: RuleCache::default(), sev_filter: None, header_form: None }
+        let mut tab = Tab::lazy(ws.path().to_path_buf(), key, uid);
+        tab.ws = Some(ws);
+        tab
+    }
+
+    fn lazy(path: PathBuf, key: PathBuf, uid: u64) -> Tab {
+        Tab { uid, key, label: tabs::label(&path), path, title: None, ws: None, tester: Tester::default(), rules: RuleCache::default(), sev_filter: None, header_form: None }
+    }
+
+    fn dirty(&self) -> bool {
+        self.ws.as_ref().is_some_and(Workspace::dirty)
     }
 
     fn relabel(&mut self) {
-        self.key = tabs::key(self.ws.path());
-        self.label = tabs::label(self.ws.path());
+        if let Some(ws) = &self.ws {
+            self.path = ws.path().to_path_buf();
+        }
+        self.key = tabs::key(&self.path);
+        self.label = tabs::label(&self.path);
         self.title = None;
     }
 
@@ -685,8 +701,10 @@ impl App {
         if let Some(c) = args.chrome {
             app.settings.chrome = c;
         }
-        if let Some(p) = args.path {
-            app.load(p);
+        app.restore_tabs();
+        match args.path {
+            Some(p) => app.load(p),
+            None => app.load_active(),
         }
         if let Some(l) = app.ws_mut() {
             if let Some(v) = args.view {
@@ -711,11 +729,11 @@ impl App {
     }
 
     fn ws(&self) -> Option<&Workspace> {
-        self.tab().map(|t| &t.ws)
+        self.tab().and_then(|t| t.ws.as_ref())
     }
 
     fn ws_mut(&mut self) -> Option<&mut Workspace> {
-        self.tab_mut().map(|t| &mut t.ws)
+        self.tab_mut().and_then(|t| t.ws.as_mut())
     }
 
     fn load(&mut self, path: PathBuf) {
@@ -756,6 +774,7 @@ impl App {
         if let Some(i) = target {
             self.activate(i);
         }
+        self.persist_tabs();
         self.remember_all(known);
         self.error = match failed.len() {
             0 => None,
@@ -765,11 +784,11 @@ impl App {
     }
 
     fn reload(&mut self) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let path = tab.ws.path().to_path_buf();
-        match tab.ws.reload() {
+        let Some(Tab { ws: Some(ws), header_form, .. }) = self.tabs.get_mut(self.active) else { return };
+        let path = ws.path().to_path_buf();
+        match ws.reload() {
             Ok(()) => {
-                tab.header_form = None;
+                *header_form = None;
                 self.error = None;
                 self.remember(path);
             }
@@ -777,12 +796,74 @@ impl App {
         }
     }
 
+    fn restore_tabs(&mut self) {
+        for path in std::mem::take(&mut self.settings.open) {
+            let Ok(key) = std::fs::canonicalize(&path) else { continue };
+            if self.tabs.iter().any(|t| t.key == key) {
+                continue;
+            }
+            self.next_uid += 1;
+            self.tabs.push(Tab::lazy(path, key, self.next_uid));
+        }
+        self.active = self.settings.active.min(self.tabs.len().saturating_sub(1));
+        self.settings.open = self.tabs.iter().map(|t| t.path.clone()).collect();
+    }
+
+    fn persist_tabs(&mut self) {
+        let same = self.settings.active == self.active && self.settings.open.len() == self.tabs.len() && self.settings.open.iter().zip(&self.tabs).all(|(p, t)| *p == t.path);
+        if !same {
+            self.settings.open = self.tabs.iter().map(|t| t.path.clone()).collect();
+            self.settings.active = self.active;
+            self.settings.save();
+        }
+    }
+
+    fn load_tab(&mut self, i: usize) -> bool {
+        let Some(tab) = self.tabs.get_mut(i) else { return false };
+        if tab.ws.is_some() {
+            return true;
+        }
+        match Workspace::open(tab.path.clone()) {
+            Ok(ws) => {
+                tab.ws = Some(ws);
+                true
+            }
+            Err(e) => {
+                self.error = Some(format!("Could not open {}: {e}", tab.path.display()));
+                self.tabs.remove(i);
+                self.active = tabs::after_close(self.active, i, self.tabs.len());
+                self.persist_tabs();
+                false
+            }
+        }
+    }
+
+    fn load_active(&mut self) {
+        while self.tabs.get(self.active).is_some_and(|t| t.ws.is_none()) {
+            self.load_tab(self.active);
+        }
+    }
+
     fn activate(&mut self, i: usize) {
-        if i < self.tabs.len() && i != self.active {
+        if !self.load_tab(i) {
+            self.load_active();
+            return;
+        }
+        if i != self.active {
             self.active = i;
             self.detail_open = false;
         }
         self.reveal_tab = true;
+    }
+
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let uid = self.tabs[self.active].uid;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = self.tabs.iter().position(|t| t.uid == uid).unwrap_or(to);
     }
 
     fn close_tab(&mut self, i: usize) {
@@ -796,6 +877,8 @@ impl App {
         self.active = tabs::after_close(self.active, i, self.tabs.len());
         self.reveal_tab = true;
         self.error = None;
+        self.load_active();
+        self.persist_tabs();
     }
 
     fn open_dialog(&mut self) {
@@ -805,13 +888,13 @@ impl App {
     }
 
     fn first_dirty(&self) -> Option<usize> {
-        self.tabs.iter().position(|t| t.ws.dirty())
+        self.tabs.iter().position(Tab::dirty)
     }
 
     fn guard(&mut self, ctx: &egui::Context, p: Pending) {
         let dirty = match &p {
             Pending::Reload => self.ws().is_some_and(|l| l.dirty()).then_some(self.active),
-            Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(|t| t.ws.dirty()).then_some(*i),
+            Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(Tab::dirty).then_some(*i),
             Pending::Close => self.first_dirty(),
         };
         match dirty {
@@ -1058,7 +1141,9 @@ impl App {
             Some(true) => {
                 let edit = form.edit(decision);
                 tab.header_form = None;
-                tab.ws.commit(edit);
+                if let Some(ws) = tab.ws.as_mut() {
+                    ws.commit(edit);
+                }
             }
             Some(false) => tab.header_form = None,
             None => {}
@@ -1079,9 +1164,9 @@ impl App {
                     }
                 }
                 Act::Jump(r) => {
-                    if let Some(tab) = self.tab_mut() {
-                        tab.ws.jump(r);
-                        tab.rules.filter.clear();
+                    if let Some(Tab { ws: Some(ws), rules, .. }) = self.tabs.get_mut(self.active) {
+                        ws.jump(r);
+                        rules.filter.clear();
                     }
                 }
                 Act::View(v) => {
@@ -1090,7 +1175,7 @@ impl App {
                     }
                 }
                 Act::TestRule(r) => {
-                    if let Some(Tab { ws: l, tester, .. }) = self.tabs.get_mut(self.active) {
+                    if let Some(Tab { ws: Some(l), tester, .. }) = self.tabs.get_mut(self.active) {
                         if l.tests().fill_to_fire(r) {
                             l.select_and_reveal(r);
                             l.set_view(View::Test);
@@ -1109,6 +1194,8 @@ impl App {
                 Act::Tab(i) => self.activate(i),
                 Act::StepTab { forward } => self.activate(tabs::step(self.active, self.tabs.len(), forward)),
                 Act::CloseTab(i) => self.guard(ctx, Pending::CloseTab(i)),
+                Act::MoveTab { from, to } => self.move_tab(from, to),
+                Act::TabDropped => self.persist_tabs(),
                 Act::Reload => self.guard(ctx, Pending::Reload),
                 Act::ToggleDark => {
                     self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
@@ -1141,8 +1228,8 @@ impl App {
                     }
                 }
                 Act::EditHeader(c) => {
-                    if let Some(tab) = self.tab_mut() {
-                        tab.header_form = tab.ws.defs().table(tab.ws.decision()).and_then(|t| HeaderForm::new(t, c));
+                    if let Some(Tab { ws: Some(ws), header_form, .. }) = self.tabs.get_mut(self.active) {
+                        *header_form = ws.defs().table(ws.decision()).and_then(|t| HeaderForm::new(t, c));
                     }
                 }
                 Act::Save => {
@@ -1166,13 +1253,12 @@ impl App {
     }
 
     fn fix_act(&mut self, a: Act) {
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let l = &mut tab.ws;
+        let Some(Tab { ws: Some(l), header_form, rules, .. }) = self.tabs.get_mut(self.active) else { return };
         match a {
             Act::FixStart(only) => {
                 if l.fix_start(only) {
-                    tab.header_form = None;
-                    tab.rules.filter.clear();
+                    *header_form = None;
+                    rules.filter.clear();
                 }
             }
             Act::FixChoose(i) => l.fix_choose(i),
@@ -1201,22 +1287,26 @@ impl App {
         let active = self.active;
         let gap = 2.0;
         let plus = 28.0;
-        let avail = (ui.available_width() - plus - 6.0).max(tabs::MIN_WIDTH);
-        let w = tabs::width(avail, self.tabs.len(), gap);
+        let count = self.tabs.len();
+        let overflow = (ui.available_width() - plus - 6.0) / count as f32 - gap < tabs::MIN_WIDTH;
+        let avail = (ui.available_width() - plus * (1.0 + f32::from(u8::from(overflow))) - 6.0).max(tabs::MIN_WIDTH);
+        let w = tabs::width(avail, count, gap);
         let corner = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             egui::ScrollArea::horizontal().id_salt("tab_strip").max_width(avail).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
+                    let origin = ui.cursor().min.x;
                     for (i, tab) in self.tabs.iter_mut().enumerate() {
                         let on = i == active;
-                        let (rect, resp) = ui.allocate_exact_size(vec2(w, tabs::HEIGHT), Sense::click());
+                        let (rect, _) = ui.allocate_exact_size(vec2(w, tabs::HEIGHT), Sense::hover());
+                        let resp = ui.interact(rect, ui.id().with(("tab", tab.uid)), Sense::click_and_drag());
                         let close_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), vec2(18.0, 18.0));
                         let close = ui.interact(close_rect, ui.id().with(("tab_close", tab.uid)), Sense::click());
                         let hovered = resp.hovered() || close.hovered();
                         let mut x = rect.left() + 11.0;
-                        let dirty = tab.ws.dirty();
+                        let dirty = tab.dirty();
                         if dirty {
                             x += 13.0;
                         }
@@ -1249,13 +1339,51 @@ impl App {
                         if on && reveal {
                             ui.scroll_to_rect(rect, None);
                         }
+                        if resp.drag_started() && !on {
+                            acts.push(Act::Tab(i));
+                        }
+                        if resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                let to = tabs::slot_at(pos.x, origin, w, gap, count);
+                                if to != i {
+                                    acts.push(Act::MoveTab { from: i, to });
+                                }
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            acts.push(Act::TabDropped);
+                        }
                         close.on_hover_text("Close (Ctrl+W, or middle-click the tab)");
                         resp.on_hover_ui(|ui| {
-                            ui.label(tab.ws.path().display().to_string());
+                            ui.label(tab.path.display().to_string());
                         });
                     }
                 });
             });
+            if overflow {
+                let (rect, resp) = ui.allocate_exact_size(vec2(plus, tabs::HEIGHT), Sense::click());
+                let p = ui.painter();
+                if resp.hovered() {
+                    p.rect_filled(rect.shrink(1.0), CornerRadius::same(6), t.chip);
+                }
+                let (c, d) = (rect.center(), 4.0);
+                let s = Stroke::new(1.5, if resp.hovered() { t.text } else { t.muted });
+                p.line_segment([c + vec2(-d, -d / 2.0), c + vec2(0.0, d / 2.0)], s);
+                p.line_segment([c + vec2(0.0, d / 2.0), c + vec2(d, -d / 2.0)], s);
+                let resp = resp.on_hover_text("All open tabs");
+                egui::Popup::menu(&resp).show(|ui| {
+                    ui.set_min_width(220.0);
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        for (i, tab) in self.tabs.iter().enumerate() {
+                            let text = if tab.dirty() { format!("\u{25cf} {}", tab.label) } else { tab.label.to_string() };
+                            if ui.selectable_label(i == active, text).on_hover_text(tab.path.display().to_string()).clicked() {
+                                acts.push(Act::Tab(i));
+                            }
+                        }
+                    });
+                });
+            }
             let (rect, resp) = ui.allocate_exact_size(vec2(plus, tabs::HEIGHT), Sense::click());
             let p = ui.painter();
             if resp.hovered() {
@@ -1321,7 +1449,7 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(Tab { ws: l, rules, label: file, .. }) = self.tabs.get_mut(self.active) else { return };
+        let Some(Tab { ws: Some(l), rules, label: file, .. }) = self.tabs.get_mut(self.active) else { return };
         let l = &*l;
         let decision = l.decision();
         let view = l.view();
@@ -1439,15 +1567,15 @@ impl App {
     }
 
     fn rules_view(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-        let Some(tab) = self.tab_mut() else { return };
-        let mut editing = tab.ws.take_editing();
-        let mut scroll = tab.ws.take_scroll();
-        let mut cache = std::mem::take(&mut tab.rules);
+        let Some(Tab { ws: Some(ws), rules, .. }) = self.tabs.get_mut(self.active) else { return };
+        let mut editing = ws.take_editing();
+        let mut scroll = ws.take_scroll();
+        let mut cache = std::mem::take(rules);
         self.rules_body(ui, acts, &mut editing, &mut scroll, &mut cache);
-        if let Some(tab) = self.tab_mut() {
-            tab.ws.restore_editing(editing);
-            tab.ws.restore_scroll(scroll);
-            tab.rules = cache;
+        if let Some(Tab { ws: Some(ws), rules, .. }) = self.tabs.get_mut(self.active) {
+            ws.restore_editing(editing);
+            ws.restore_scroll(scroll);
+            *rules = cache;
         }
     }
 
@@ -1466,7 +1594,7 @@ impl App {
             }
         };
         let fired: &[usize] = outcome.as_ref().map_or(&[], |o| &o.fired);
-        let Some(l) = self.tabs.get(self.active).map(|t| &t.ws) else { return };
+        let Some(l) = self.tabs.get(self.active).and_then(|t| t.ws.as_ref()) else { return };
         let decision = l.decision();
         let Some(dec) = l.defs().decisions.get(decision) else { return };
         let tb = match &dec.logic {
@@ -2846,17 +2974,19 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ctx.input(|i| if i.raw.dropped_files.is_empty() { Vec::new() } else { i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect() });
         let mut acts = Vec::new();
         self.shortcuts(&ctx, &mut acts);
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.allow_close
-            && let Some(i) = self.first_dirty()
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.review = None;
-            self.activate(i);
-            if let Some(l) = self.ws_mut() {
-                l.fix_close();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            match self.first_dirty().filter(|_| !self.allow_close) {
+                Some(i) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.review = None;
+                    self.activate(i);
+                    if let Some(l) = self.ws_mut() {
+                        l.fix_close();
+                    }
+                    self.pending = Some(Pending::Close);
+                }
+                None => self.persist_tabs(),
             }
-            self.pending = Some(Pending::Close);
         }
         if self.is_fixing() && self.review.is_none() && self.pending.is_none() && ctx.memory(|m| m.focused().is_none()) {
             let step = self.ws().is_some_and(|l| l.fix_offering());
@@ -2972,7 +3102,7 @@ impl eframe::App for App {
             View::Issues => self.issues_view(ui, &mut acts),
             View::Xml => self.xml_view(ui),
             View::Test => {
-                if let Some(Tab { ws, tester, .. }) = self.tabs.get_mut(self.active) {
+                if let Some(Tab { ws: Some(ws), tester, .. }) = self.tabs.get_mut(self.active) {
                     let selected = ws.selected();
                     test_view(ui, ws, selected, tester, &t, &mut acts);
                 }

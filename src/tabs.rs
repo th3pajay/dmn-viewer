@@ -42,9 +42,21 @@ pub fn width(available: f32, count: usize, gap: f32) -> f32 {
     (available / count.max(1) as f32 - gap).clamp(MIN_WIDTH, MAX_WIDTH)
 }
 
+pub fn slot_at(x: f32, origin: f32, width: f32, gap: f32, count: usize) -> usize {
+    (((x - origin) / (width + gap)).max(0.0) as usize).min(count.saturating_sub(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragging_picks_the_slot_under_the_pointer() {
+        assert_eq!(slot_at(5.0, 0.0, 100.0, 2.0, 4), 0);
+        assert_eq!(slot_at(150.0, 0.0, 100.0, 2.0, 4), 1);
+        assert_eq!(slot_at(-40.0, 0.0, 100.0, 2.0, 4), 0);
+        assert_eq!(slot_at(9000.0, 0.0, 100.0, 2.0, 4), 3);
+    }
 
     #[test]
     fn closing_moves_the_active_tab_like_a_browser() {
