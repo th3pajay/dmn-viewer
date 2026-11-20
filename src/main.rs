@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod menu;
+mod tabs;
 
 use dmn_viewer::diff::{self, Hunk};
 use dmn_viewer::edit::Edit;
@@ -360,7 +361,7 @@ enum Pending {
     Open,
     Reload,
     Load(PathBuf),
-    CloseFile,
+    CloseTab(usize),
     Close,
 }
 
@@ -484,6 +485,9 @@ enum Act {
     Decision(usize),
     Open,
     Reload,
+    Tab(usize),
+    StepTab { forward: bool },
+    CloseTab(usize),
     ToggleDark,
     ToggleLangs,
     Deselect,
@@ -534,6 +538,10 @@ struct RuleCache {
 }
 
 struct Tab {
+    uid: u64,
+    key: PathBuf,
+    label: Arc<str>,
+    title: Option<(f32, f32, Arc<egui::Galley>)>,
     ws: Workspace,
     tester: Tester,
     rules: RuleCache,
@@ -542,14 +550,36 @@ struct Tab {
 }
 
 impl Tab {
-    fn new(ws: Workspace) -> Tab {
-        Tab { ws, tester: Tester::default(), rules: RuleCache::default(), sev_filter: None, header_form: None }
+    fn new(ws: Workspace, key: PathBuf, uid: u64) -> Tab {
+        Tab { uid, key, label: tabs::label(ws.path()), title: None, ws, tester: Tester::default(), rules: RuleCache::default(), sev_filter: None, header_form: None }
+    }
+
+    fn relabel(&mut self) {
+        self.key = tabs::key(self.ws.path());
+        self.label = tabs::label(self.ws.path());
+        self.title = None;
+    }
+
+    fn title(&mut self, ui: &egui::Ui, max_width: f32) -> Arc<egui::Galley> {
+        let ppp = ui.ctx().pixels_per_point();
+        match &self.title {
+            Some((w, p, g)) if *w == max_width && *p == ppp => g.clone(),
+            _ => {
+                let mut job = egui::text::LayoutJob::single_section(self.label.to_string(), egui::TextFormat::simple(FontId::proportional(12.5), Color32::PLACEHOLDER));
+                job.wrap = egui::text::TextWrapping { max_width, max_rows: 1, break_anywhere: true, overflow_character: Some('\u{2026}') };
+                let g = ui.painter().layout_job(job);
+                self.title = Some((max_width, ppp, g.clone()));
+                g
+            }
+        }
     }
 }
 
 struct App {
     tabs: Vec<Tab>,
     active: usize,
+    next_uid: u64,
+    reveal_tab: bool,
     error: Option<String>,
     detail_after: f64,
     detail_open: bool,
@@ -641,6 +671,8 @@ impl App {
         let mut app = App {
             tabs: Vec::new(),
             active: 0,
+            next_uid: 0,
+            reveal_tab: false,
             error: None,
             detail_after: 0.0,
             detail_open: false,
@@ -689,30 +721,60 @@ impl App {
     }
 
     fn load(&mut self, path: PathBuf) {
-        let opened = match self.tabs.get_mut(self.active) {
-            Some(tab) if tab.ws.path() == path => tab.ws.reload(),
-            _ => Workspace::open(path.clone()).map(|mut ws| match self.tabs.get_mut(self.active) {
-                Some(tab) => {
-                    ws.adopt_view(&tab.ws);
-                    tab.ws = ws;
-                    tab.tester = Tester::default();
+        let key = tabs::key(&path);
+        if let Some(i) = self.tabs.iter().position(|t| t.key == key) {
+            self.activate(i);
+            self.error = None;
+            self.remember(path);
+            return;
+        }
+        match Workspace::open(path.clone()) {
+            Ok(mut ws) => {
+                if let Some(cur) = self.ws() {
+                    ws.adopt_view(cur);
                 }
-                None => {
-                    self.tabs.push(Tab::new(ws));
-                    self.active = self.tabs.len() - 1;
-                }
-            }),
-        };
-        match opened {
-            Ok(()) => {
+                self.next_uid += 1;
+                self.tabs.push(Tab::new(ws, key, self.next_uid));
+                self.activate(self.tabs.len() - 1);
                 self.error = None;
-                if let Some(tab) = self.tab_mut() {
-                    tab.header_form = None;
-                }
                 self.remember(path);
             }
             Err(e) => self.error = Some(format!("Could not open {}: {e}", path.display())),
         }
+    }
+
+    fn reload(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let path = tab.ws.path().to_path_buf();
+        match tab.ws.reload() {
+            Ok(()) => {
+                tab.header_form = None;
+                self.error = None;
+                self.remember(path);
+            }
+            Err(e) => self.error = Some(format!("Could not open {}: {e}", path.display())),
+        }
+    }
+
+    fn activate(&mut self, i: usize) {
+        if i < self.tabs.len() && i != self.active {
+            self.active = i;
+            self.detail_open = false;
+        }
+        self.reveal_tab = true;
+    }
+
+    fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(i);
+        if i == self.active {
+            self.detail_open = false;
+        }
+        self.active = tabs::after_close(self.active, i, self.tabs.len());
+        self.reveal_tab = true;
+        self.error = None;
     }
 
     fn open_dialog(&mut self) {
@@ -721,35 +783,45 @@ impl App {
         }
     }
 
+    fn first_dirty(&self) -> Option<usize> {
+        self.tabs.iter().position(|t| t.ws.dirty())
+    }
+
     fn guard(&mut self, ctx: &egui::Context, p: Pending) {
-        if self.ws().is_some_and(|l| l.dirty()) {
-            self.pending = Some(p);
-        } else {
-            self.run(ctx, p);
+        let dirty = match &p {
+            Pending::Open | Pending::Load(_) => None,
+            Pending::Reload => self.ws().is_some_and(|l| l.dirty()).then_some(self.active),
+            Pending::CloseTab(i) => self.tabs.get(*i).is_some_and(|t| t.ws.dirty()).then_some(*i),
+            Pending::Close => self.first_dirty(),
+        };
+        match dirty {
+            Some(i) => {
+                self.activate(i);
+                self.pending = Some(match p {
+                    Pending::CloseTab(_) => Pending::CloseTab(i),
+                    p => p,
+                });
+            }
+            None => self.run(ctx, p),
         }
     }
 
     fn run(&mut self, ctx: &egui::Context, p: Pending) {
         match p {
             Pending::Open => self.open_dialog(),
-            Pending::Reload => {
-                if let Some(p) = self.ws().map(|l| l.path().to_path_buf()) {
-                    self.load(p);
-                }
-            }
+            Pending::Reload => self.reload(),
             Pending::Load(p) => self.load(p),
-            Pending::CloseFile => {
-                if self.active < self.tabs.len() {
-                    self.tabs.remove(self.active);
+            Pending::CloseTab(i) => self.close_tab(i),
+            Pending::Close => match self.first_dirty() {
+                Some(i) => {
+                    self.activate(i);
+                    self.pending = Some(Pending::Close);
                 }
-                self.active = self.active.min(self.tabs.len().saturating_sub(1));
-                self.review = None;
-                self.error = None;
-            }
-            Pending::Close => {
-                self.allow_close = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+                None => {
+                    self.allow_close = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            },
         }
     }
 
@@ -864,7 +936,7 @@ impl App {
     fn pending_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let t = self.theme;
-        let file = self.ws().and_then(|l| l.path().file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let file = self.tab().map_or_else(Default::default, |t| t.label.clone());
         let mut choice = None;
         egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
             ui.set_width(360.0);
@@ -1016,6 +1088,9 @@ impl App {
                     }
                 }
                 Act::Open => self.guard(ctx, Pending::Open),
+                Act::Tab(i) => self.activate(i),
+                Act::StepTab { forward } => self.activate(tabs::step(self.active, self.tabs.len(), forward)),
+                Act::CloseTab(i) => self.guard(ctx, Pending::CloseTab(i)),
                 Act::Reload => self.guard(ctx, Pending::Reload),
                 Act::ToggleDark => {
                     self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
@@ -1102,6 +1177,82 @@ impl App {
         }
     }
 
+    fn tab_strip(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        let t = self.theme;
+        let reveal = std::mem::take(&mut self.reveal_tab);
+        let active = self.active;
+        let gap = 2.0;
+        let plus = 28.0;
+        let avail = (ui.available_width() - plus - 6.0).max(tabs::MIN_WIDTH);
+        let w = tabs::width(avail, self.tabs.len(), gap);
+        let corner = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            egui::ScrollArea::horizontal().id_salt("tab_strip").max_width(avail).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (i, tab) in self.tabs.iter_mut().enumerate() {
+                        let on = i == active;
+                        let (rect, resp) = ui.allocate_exact_size(vec2(w, tabs::HEIGHT), Sense::click());
+                        let close_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), vec2(18.0, 18.0));
+                        let close = ui.interact(close_rect, ui.id().with(("tab_close", tab.uid)), Sense::click());
+                        let hovered = resp.hovered() || close.hovered();
+                        let mut x = rect.left() + 11.0;
+                        let dirty = tab.ws.dirty();
+                        if dirty {
+                            x += 13.0;
+                        }
+                        let title = tab.title(ui, (close_rect.left() - 4.0 - x).max(0.0).floor());
+                        let p = ui.painter();
+                        if on {
+                            p.rect(rect, corner, t.surface, Stroke::new(1.0, t.line), StrokeKind::Inside);
+                            p.line_segment([rect.left_bottom() + vec2(1.0, -0.5), rect.right_bottom() + vec2(-1.0, -0.5)], Stroke::new(2.0, t.surface));
+                        } else if hovered {
+                            p.rect_filled(rect, corner, t.hover);
+                        }
+                        if dirty {
+                            p.circle_filled(egui::pos2(rect.left() + 14.5, rect.center().y), 3.5, t.accent);
+                        }
+                        p.galley(egui::pos2(x, rect.center().y - title.size().y / 2.0), title, if on { t.text } else { t.muted });
+                        if on || hovered {
+                            if close.hovered() {
+                                p.rect_filled(close_rect, CornerRadius::same(4), t.chip);
+                            }
+                            let (c, d) = (close_rect.center(), 3.5);
+                            let s = Stroke::new(1.4, if close.hovered() { t.text } else { t.faint });
+                            p.line_segment([c - vec2(d, d), c + vec2(d, d)], s);
+                            p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], s);
+                        }
+                        if close.clicked() || resp.middle_clicked() {
+                            acts.push(Act::CloseTab(i));
+                        } else if resp.clicked() && !on {
+                            acts.push(Act::Tab(i));
+                        }
+                        if on && reveal {
+                            ui.scroll_to_rect(rect, None);
+                        }
+                        close.on_hover_text("Close (Ctrl+W, or middle-click the tab)");
+                        resp.on_hover_ui(|ui| {
+                            ui.label(tab.ws.path().display().to_string());
+                        });
+                    }
+                });
+            });
+            let (rect, resp) = ui.allocate_exact_size(vec2(plus, tabs::HEIGHT), Sense::click());
+            let p = ui.painter();
+            if resp.hovered() {
+                p.rect_filled(rect.shrink(1.0), CornerRadius::same(6), t.chip);
+            }
+            let (c, d) = (rect.center(), 5.0);
+            let s = Stroke::new(1.5, if resp.hovered() { t.text } else { t.muted });
+            p.line_segment([c - vec2(d, 0.0), c + vec2(d, 0.0)], s);
+            p.line_segment([c - vec2(0.0, d), c + vec2(0.0, d)], s);
+            if resp.on_hover_text("Open a file in a new tab (Ctrl+O)").clicked() {
+                acts.push(Act::Open);
+            }
+        });
+    }
+
     fn nav(&self, ui: &mut egui::Ui, suite_stats: Option<(usize, usize)>, acts: &mut Vec<Act>) {
         let t = &self.theme;
         ui.horizontal(|ui| {
@@ -1152,11 +1303,10 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(Tab { ws: l, rules, .. }) = self.tabs.get_mut(self.active) else { return };
+        let Some(Tab { ws: l, rules, label: file, .. }) = self.tabs.get_mut(self.active) else { return };
         let l = &*l;
         let decision = l.decision();
         let view = l.view();
-        let file = l.path().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let dec = l.defs().decisions.get(decision);
         let dirty = l.dirty();
         let fixing = l.is_fixing();
@@ -2678,10 +2828,13 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         let mut acts = Vec::new();
         self.shortcuts(&ctx, &mut acts);
-        let dirty = self.ws().is_some_and(|l| l.dirty());
-        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.allow_close {
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.allow_close
+            && let Some(i) = self.first_dirty()
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.review = None;
+            self.activate(i);
             if let Some(l) = self.ws_mut() {
                 l.fix_close();
             }
@@ -2749,6 +2902,13 @@ impl eframe::App for App {
         self.chrome_bar(ui, &mut acts);
         self.notice_bar(ui);
 
+        if !self.tabs.is_empty() {
+            egui::Panel::top("tabs")
+                .exact_size(tabs::HEIGHT + 6.0)
+                .frame(Frame::new().fill(t.canvas).inner_margin(Margin { left: 8, right: 6, top: 6, bottom: 0 }))
+                .show(ui, |ui| self.tab_strip(ui, &mut acts));
+        }
+
         if self.shell.show_nav() {
             egui::Panel::left("nav")
                 .resizable(false)
@@ -2788,7 +2948,8 @@ impl eframe::App for App {
             egui::Panel::right("fix_panel").resizable(true).default_size(400.0).frame(Frame::new().fill(t.surface).inner_margin(Margin::same(0))).show(ui, |ui| fix_panel(ui, &t, &v, &mut acts));
         }
 
-        match self.view() {
+        let uid = self.tab().map_or(0, |tab| tab.uid);
+        ui.push_id(uid, |ui| match self.view() {
             View::Rules => self.rules_view(ui, &mut acts),
             View::Issues => self.issues_view(ui, &mut acts),
             View::Xml => self.xml_view(ui),
@@ -2798,7 +2959,7 @@ impl eframe::App for App {
                     test_view(ui, ws, selected, tester, &t, &mut acts);
                 }
             }
-        }
+        });
         self.palette_ui(&ctx, &mut acts);
         self.apply(&ctx, acts);
         self.header_window(&ctx);

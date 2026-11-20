@@ -85,7 +85,10 @@ pub enum Cmd {
     Open,
     OpenRecent(usize),
     ClearRecent,
-    CloseFile,
+    CloseTab,
+    NextTab,
+    PrevTab,
+    Tab(usize),
     Reload,
     Revert,
     Save,
@@ -136,7 +139,9 @@ const STATIC: &[Cmd] = &[
     Cmd::Export(Format::Markdown),
     Cmd::Export(Format::Json),
     Cmd::ClearRecent,
-    Cmd::CloseFile,
+    Cmd::CloseTab,
+    Cmd::NextTab,
+    Cmd::PrevTab,
     Cmd::Quit,
     Cmd::Undo,
     Cmd::Redo,
@@ -190,7 +195,10 @@ fn keys(c: Cmd) -> Option<Bind> {
         Cmd::Save => Bind::Elsewhere(ctrl, Key::S),
         Cmd::SaveAs => Bind::Own(ctrl_shift, Key::S),
         Cmd::Quit => Bind::Own(ctrl, Key::Q),
-        Cmd::CloseFile => Bind::Own(ctrl, Key::W),
+        Cmd::CloseTab => Bind::Own(ctrl, Key::W),
+        Cmd::NextTab => Bind::Text("Ctrl+Tab"),
+        Cmd::PrevTab => Bind::Text("Ctrl+Shift+Tab"),
+        Cmd::Tab(n) => Bind::Text(TAB_KEYS.get(n)?),
         Cmd::Undo => Bind::Elsewhere(ctrl, Key::Z),
         Cmd::Redo => Bind::Elsewhere(ctrl, Key::Y),
         Cmd::Find => Bind::Own(ctrl, Key::F),
@@ -222,12 +230,17 @@ fn keys(c: Cmd) -> Option<Bind> {
     })
 }
 
+const TAB_KEYS: [&str; 8] = ["Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "Alt+6", "Alt+7", "Alt+8"];
+const TAB_SLOTS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+
 fn needs_idle(c: Cmd) -> bool {
     matches!(c, Cmd::InsertAbove | Cmd::InsertBelow | Cmd::Duplicate | Cmd::DeleteRule | Cmd::MoveUp | Cmd::MoveDown | Cmd::CopyRule | Cmd::PasteRule)
 }
 
 pub struct State {
     doc: bool,
+    tabs: usize,
+    modal: bool,
     editable: bool,
     dirty: bool,
     locked: bool,
@@ -334,6 +347,8 @@ impl App {
         let l = self.ws();
         State {
             doc: l.is_some(),
+            tabs: self.tabs.len(),
+            modal: self.review.is_some() || self.pending.is_some(),
             editable: l.is_some_and(|l| l.editable()),
             dirty: l.is_some_and(|l| l.dirty()),
             locked: self.review.is_some() || self.is_fixing(),
@@ -374,7 +389,16 @@ impl App {
             Cmd::Save => i("Save", ic::SAVE, "File", s.dirty && !s.locked),
             Cmd::SaveAs => i("Save as…", ic::SAVE_AS, "File", s.doc && s.editable && !s.locked),
             Cmd::Export(f) => info_of(Cow::Owned(format!("Export as {}…", f.label())), ic::EXPORT, "File", s.table),
-            Cmd::CloseFile => i("Close", ic::X, "File", s.doc && !s.locked),
+            Cmd::CloseTab => i("Close tab", ic::X, "File", s.doc && !s.modal),
+            Cmd::NextTab => i("Next tab", ic::DOWN, "Tabs", s.tabs > 1 && !s.modal),
+            Cmd::PrevTab => i("Previous tab", ic::UP, "Tabs", s.tabs > 1 && !s.modal),
+            Cmd::Tab(n) => {
+                let tab = self.tabs.get(n);
+                Info {
+                    tip: tab.map(|t| t.ws.path().display().to_string()),
+                    ..toggle(info_of(Cow::Owned(tab.map_or_else(String::new, |t| t.label.to_string())), ic::NEW, "Tabs", tab.is_some() && !s.modal), n == self.active)
+                }
+            }
             Cmd::Quit => i("Exit", ic::X, "File", true),
             Cmd::Undo => i("Undo", ic::UNDO, "Edit", s.doc && s.can_undo),
             Cmd::Redo => i("Redo", ic::REDO, "Edit", s.doc && s.can_redo && !s.locked),
@@ -447,6 +471,26 @@ impl App {
                 }
             }
         }
+        self.tab_keys(ctx, &s, acts);
+    }
+
+    fn tab_keys(&self, ctx: &egui::Context, s: &State, acts: &mut Vec<Act>) {
+        if s.tabs < 2 || s.modal {
+            return;
+        }
+        let ctrl = Modifiers::COMMAND;
+        let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        ctx.input_mut(|i| {
+            if i.consume_key(ctrl_shift, Key::Tab) || i.consume_key(ctrl, Key::PageUp) {
+                acts.push(Act::StepTab { forward: false });
+            } else if i.consume_key(ctrl, Key::Tab) || i.consume_key(ctrl, Key::PageDown) {
+                acts.push(Act::StepTab { forward: true });
+            } else if let Some(n) = TAB_SLOTS.iter().position(|&k| i.consume_key(Modifiers::ALT, k))
+                && let Some(t) = crate::tabs::slot(n, s.tabs)
+            {
+                acts.push(Act::Tab(t));
+            }
+        });
     }
 
     pub fn run_cmd(&mut self, ctx: &egui::Context, c: Cmd) {
@@ -476,7 +520,10 @@ impl App {
             Cmd::Save => act(self, Act::Save),
             Cmd::SaveAs => self.save_as(),
             Cmd::Export(f) => self.export(f),
-            Cmd::CloseFile => self.guard(ctx, Pending::CloseFile),
+            Cmd::CloseTab => act(self, Act::CloseTab(self.active)),
+            Cmd::NextTab => act(self, Act::StepTab { forward: true }),
+            Cmd::PrevTab => act(self, Act::StepTab { forward: false }),
+            Cmd::Tab(n) => act(self, Act::Tab(n)),
             Cmd::Quit => self.guard(ctx, Pending::Close),
             Cmd::Undo => act(self, Act::Undo),
             Cmd::Redo => act(self, Act::Redo),
@@ -559,8 +606,9 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else { return };
-        let Some(l) = self.ws_mut() else { return };
-        if l.save_as(path.clone()) {
+        let Some(tab) = self.tab_mut() else { return };
+        if tab.ws.save_as(path.clone()) {
+            tab.relabel();
             self.shell.notice = Some(format!("Saved as {}", file_name(&path)));
             self.remember(path);
         }
@@ -659,7 +707,7 @@ impl App {
             }
         });
         ui.separator();
-        self.item(ui, s, Cmd::CloseFile, acts);
+        self.item(ui, s, Cmd::CloseTab, acts);
         self.item(ui, s, Cmd::Quit, acts);
     }
 
@@ -715,6 +763,15 @@ impl App {
         ui.separator();
         for c in [Cmd::PrevIssue, Cmd::NextIssue] {
             self.item(ui, s, c, acts);
+        }
+        if !self.tabs.is_empty() {
+            ui.separator();
+            for c in [Cmd::NextTab, Cmd::PrevTab] {
+                self.item(ui, s, c, acts);
+            }
+            for n in 0..self.tabs.len() {
+                self.item(ui, s, Cmd::Tab(n), acts);
+            }
         }
     }
 
@@ -815,7 +872,7 @@ impl App {
 
     fn palette_items(&self, s: &State, query: &str) -> Vec<(Cmd, Info, i32)> {
         let n_decisions = self.ws().map_or(0, |l| l.defs().decisions.len());
-        let dynamic = (0..n_decisions).map(Cmd::Go).chain((0..self.settings.recent.len()).map(Cmd::OpenRecent));
+        let dynamic = (0..n_decisions).map(Cmd::Go).chain((0..self.tabs.len()).map(Cmd::Tab)).chain((0..self.settings.recent.len()).map(Cmd::OpenRecent));
         let mut items: Vec<(Cmd, Info, i32)> = STATIC
             .iter()
             .copied()
@@ -973,6 +1030,12 @@ impl App {
                                 let inf = self.info(c, &s);
                                 ui.label(RichText::new(inf.group).color(t.faint));
                                 ui.label(inf.label.as_ref());
+                                ui.label(RichText::new(k).monospace().color(t.muted));
+                                ui.end_row();
+                            }
+                            for (label, k) in [("Next tab", "Ctrl+PgDn"), ("Previous tab", "Ctrl+PgUp"), ("Tab 1 to 8", "Alt+1 \u{2026} Alt+8"), ("Last tab", "Alt+9"), ("Close tab", "Middle-click")] {
+                                ui.label(RichText::new("Tabs").color(t.faint));
+                                ui.label(label);
                                 ui.label(RichText::new(k).monospace().color(t.muted));
                                 ui.end_row();
                             }
