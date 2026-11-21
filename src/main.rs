@@ -312,6 +312,18 @@ fn button(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str, primary: bool) 
     ui.add(egui::Button::new(text.color(fg)).fill(fill).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(8)).min_size(vec2(0.0, 32.0)))
 }
 
+fn button_galley(ui: &mut egui::Ui, t: &Theme, text: &Arc<egui::Galley>, primary: bool) -> egui::Response {
+    let (fill, stroke) = if primary { (t.accent, t.accent) } else { (t.surface, t.line) };
+    ui.add(egui::Button::new(text.clone()).fill(fill).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(8)).min_size(vec2(0.0, 32.0)))
+}
+
+fn pill_galley(ui: &mut egui::Ui, text: &Arc<egui::Galley>, bg: Color32, fg: Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(text.size().x + 18.0, 22.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(11), bg);
+    ui.painter().galley(rect.center() - text.size() / 2.0, text.clone(), fg);
+    resp
+}
+
 fn small_button(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str) -> egui::Response {
     let text = if label.is_empty() { RichText::new(icon).size(13.0) } else { RichText::new(format!("{icon} {label}")).size(12.5) };
     ui.add(egui::Button::new(text.color(t.text)).fill(t.surface).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(6)).min_size(vec2(0.0, 24.0)))
@@ -380,6 +392,86 @@ impl Glyphs {
             ],
             notes_badge: None,
         }
+    }
+}
+
+struct HeadGlyphs {
+    key: (bool, f32),
+    run: Arc<egui::Galley>,
+    note: Arc<egui::Galley>,
+    add_note: Arc<egui::Galley>,
+    save: Arc<egui::Galley>,
+    review: Arc<egui::Galley>,
+    copy: Arc<egui::Galley>,
+    fixing: Arc<egui::Galley>,
+    feel: Arc<egui::Galley>,
+    hint: Arc<egui::Galley>,
+    search: Arc<egui::Galley>,
+    clear: Arc<egui::Galley>,
+    fix: Option<(usize, Arc<egui::Galley>)>,
+}
+
+impl HeadGlyphs {
+    fn new(ui: &egui::Ui, t: &Theme, key: (bool, f32)) -> HeadGlyphs {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let btn = |icon: &str, label: &str, color: Color32| ui.painter().layout_no_wrap(format!("{icon}  {label}"), font.clone(), color);
+        HeadGlyphs {
+            key,
+            run: btn(ic::PLAY, "Run tests", t.on_accent),
+            note: btn(ic::NOTE, "Note", t.text),
+            add_note: btn(ic::NOTE, "Add note", t.text),
+            save: btn(ic::SAVE, "Save", t.text),
+            review: btn(ic::SEARCH, "Review", t.text),
+            copy: btn(ic::COPY, "Copy report", t.text),
+            fixing: glyph(ui, "Fixing: the table is read-only", FontId::new(11.5, bold_family())),
+            feel: glyph(ui, "FEEL (default)", font.clone()),
+            hint: glyph(ui, "Filter rules", body.clone()),
+            search: glyph(ui, ic::SEARCH, body.clone()),
+            clear: ui.painter().layout_no_wrap(ic::X.to_string(), font, t.muted),
+            fix: None,
+        }
+    }
+
+    fn fix(&mut self, ui: &egui::Ui, t: &Theme, n: usize) -> Arc<egui::Galley> {
+        if self.fix.as_ref().is_none_or(|(k, _)| *k != n) {
+            self.fix = Some((n, ui.painter().layout_no_wrap(format!("{}  Fix issues ({n})", ic::CHECK), egui::TextStyle::Button.resolve(ui.style()), t.text)));
+        }
+        self.fix.as_ref().map_or_else(|| self.copy.clone(), |(_, g)| g.clone())
+    }
+}
+
+#[derive(Default)]
+struct HeadCache {
+    key: Option<(u64, usize, f32)>,
+    name: Option<Arc<egui::Galley>>,
+    hit: Option<Arc<egui::Galley>>,
+    hit_pill: Option<Arc<egui::Galley>>,
+    agg: Option<Arc<egui::Galley>>,
+    lang: Option<Arc<egui::Galley>>,
+    shape: Option<Arc<egui::Galley>>,
+    version: Option<Arc<egui::Galley>>,
+}
+
+impl HeadCache {
+    fn sync(&mut self, ui: &egui::Ui, l: &Workspace, ppp: f32) {
+        let key = (l.revision(), l.decision(), ppp);
+        if self.key == Some(key) {
+            return;
+        }
+        self.key = Some(key);
+        let defs = l.defs();
+        let button = egui::TextStyle::Button.resolve(ui.style());
+        let pill = FontId::new(11.5, bold_family());
+        let dec = defs.decisions.get(l.decision());
+        let tb = dec.and_then(|d| if let DecisionLogic::Table(tb) = &d.logic { Some(tb) } else { None });
+        self.name = dec.map(|d| glyph(ui, if d.name.is_empty() { &d.id } else { &d.name }, FontId::new(14.0, bold_family())));
+        self.hit = tb.map(|tb| glyph(ui, tb.hit_policy.name(), button.clone()));
+        self.hit_pill = tb.map(|tb| glyph(ui, &tb.hit_policy.to_string(), pill.clone()));
+        self.agg = tb.and_then(|tb| if let HitPolicy::Collect(agg) = &tb.hit_policy { Some(glyph(ui, agg.as_ref().map_or("list", Aggregation::name), button.clone())) } else { None });
+        self.shape = tb.map(|tb| glyph(ui, &format!("{} in \u{b7} {} out", tb.inputs.len(), tb.outputs.len()), pill.clone()));
+        self.lang = defs.expression_language.as_deref().map(|f| glyph(ui, Language::CHOICES.iter().find(|(_, v)| v.is_some_and(|v| f.eq_ignore_ascii_case(v))).map_or(f, |(n, _)| n), button));
+        self.version = defs.dmn_version.map(|v| glyph(ui, &format!("DMN {v}"), pill));
     }
 }
 
@@ -752,6 +844,7 @@ struct Tab {
     sev_filter: Option<Severity>,
     header_form: Option<HeaderForm>,
     nav: NavCache,
+    head: HeadCache,
     crumb: Option<(bool, f32, Arc<egui::Galley>)>,
 }
 
@@ -775,6 +868,7 @@ impl Tab {
             sev_filter: None,
             header_form: None,
             nav: NavCache::default(),
+            head: HeadCache::default(),
             crumb: None,
         }
     }
@@ -830,6 +924,7 @@ struct App {
     memo_tick: bool,
     show_notes: bool,
     glyphs: Option<Glyphs>,
+    head_glyphs: Option<HeadGlyphs>,
     settings: menu::Settings,
     shell: menu::Shell,
 }
@@ -932,6 +1027,7 @@ impl App {
             memo_tick: false,
             show_notes: false,
             glyphs: None,
+            head_glyphs: None,
             settings: menu::Settings::load(),
             shell: menu::Shell::default(),
         };
@@ -2045,17 +2141,21 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(Tab { ws: Some(l), rules, label: file, key, crumb, .. }) = self.tabs.get_mut(self.active) else { return };
+        let ppp = ui.ctx().pixels_per_point();
+        if self.head_glyphs.as_ref().is_none_or(|g| g.key != (t.dark, ppp)) {
+            self.head_glyphs = Some(HeadGlyphs::new(ui, &t, (t.dark, ppp)));
+        }
+        let App { tabs, active, head_glyphs: Some(hg), memos, memo_anchor, shell, .. } = self else { return };
+        let Some(Tab { ws: Some(l), rules, label: file, key, crumb, head, .. }) = tabs.get_mut(*active) else { return };
         let l = &*l;
+        head.sync(ui, l, ppp);
         let decision = l.decision();
         let view = l.view();
         let dec = l.defs().decisions.get(decision);
         let dirty = l.dirty();
         let fixing = l.is_fixing();
         let fixable = l.fixable_count();
-        let dmn_version = l.defs().dmn_version;
         ui.horizontal_centered(|ui| {
-            let ppp = ui.ctx().pixels_per_point();
             if crumb.as_ref().is_none_or(|(d, p, _)| *d != dirty || *p != ppp) {
                 *crumb = Some((dirty, ppp, glyph(ui, &format!("{file}{}  /", if dirty { " \u{2022}" } else { "" }), egui::TextStyle::Body.resolve(ui.style()))));
             }
@@ -2064,96 +2164,99 @@ impl App {
                 ui.painter().galley(r.min, g.clone(), t.faint);
                 resp.on_hover_text(if dirty { "Unsaved changes (Ctrl+S to save)" } else { "Saved" });
             }
-            if let Some(d) = dec {
-                ui.label(bold(if d.name.is_empty() { &d.id } else { &d.name }, 14.0).color(t.text));
-                if let DecisionLogic::Table(tb) = &d.logic {
-                    if l.editable() && !fixing {
-                        let current = &tb.hit_policy;
-                        let mut picked_hp = None;
-                        egui::ComboBox::from_id_salt("hit_policy").selected_text(current.name()).width(120.0).show_ui(ui, |ui| {
+            if let Some(g) = &head.name {
+                let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+                ui.painter().galley(r.min, g.clone(), t.text);
+            }
+            if let Some(DecisionLogic::Table(tb)) = dec.map(|d| &d.logic) {
+                if l.editable() && !fixing {
+                    let current = &tb.hit_policy;
+                    let mut picked_hp = None;
+                    if let Some(g) = &head.hit {
+                        egui::ComboBox::from_id_salt("hit_policy").selected_text(g.clone()).width(120.0).show_ui(ui, |ui| {
                             for p in HitPolicy::ALL {
                                 if ui.selectable_label(current.same_kind(&p), p.name()).clicked() && !current.same_kind(&p) {
                                     picked_hp = Some(p);
                                 }
                             }
                         });
-                        if let HitPolicy::Collect(agg) = current {
-                            egui::ComboBox::from_id_salt("aggregation").selected_text(agg.as_ref().map_or("list", Aggregation::name)).width(70.0).show_ui(ui, |ui| {
-                                if ui.selectable_label(agg.is_none(), "list").clicked() && agg.is_some() {
-                                    picked_hp = Some(HitPolicy::Collect(None));
-                                }
-                                for a in Aggregation::ALL {
-                                    let on = agg.as_ref() == Some(&a);
-                                    if ui.selectable_label(on, a.name()).clicked() && !on {
-                                        picked_hp = Some(HitPolicy::Collect(Some(a)));
-                                    }
-                                }
-                            });
-                        }
-                        if let Some(hit_policy) = picked_hp {
-                            acts.push(Act::Edit(Edit::HitPolicy { decision, hit_policy }));
-                        }
-                        let file_lang = l.defs().expression_language.clone();
-                        let shown = Language::CHOICES
-                            .iter()
-                            .find(|(_, v)| v.map(str::to_string) == file_lang.as_ref().map(|s| s.to_ascii_lowercase()))
-                            .map_or_else(|| file_lang.clone().unwrap_or_default(), |(n, _)| n.to_string());
-                        let shown = if file_lang.is_none() { "FEEL (default)".to_string() } else { shown };
-                        let mut picked = file_lang.clone();
-                        egui::ComboBox::from_id_salt("file_language")
-                            .selected_text(shown)
-                            .width(130.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut picked, None, "FEEL (default)");
-                                for (name, v) in Language::CHOICES.iter().skip(1) {
-                                    ui.selectable_value(&mut picked, v.map(str::to_string), *name);
-                                }
-                            })
-                            .response
-                            .on_hover_text("Expression language for the whole file. Cells and inputs can override it.");
-                        if picked != file_lang {
-                            acts.push(Act::Edit(Edit::FileLanguage { lang: picked }));
-                        }
-                    } else {
-                        pill(ui, tb.hit_policy.to_string(), t.chip, t.muted).on_hover_text("Hit policy");
                     }
-                    pill(ui, format!("{} in · {} out", tb.inputs.len(), tb.outputs.len()), t.chip, t.muted);
+                    if let (HitPolicy::Collect(agg), Some(g)) = (current, &head.agg) {
+                        egui::ComboBox::from_id_salt("aggregation").selected_text(g.clone()).width(70.0).show_ui(ui, |ui| {
+                            if ui.selectable_label(agg.is_none(), "list").clicked() && agg.is_some() {
+                                picked_hp = Some(HitPolicy::Collect(None));
+                            }
+                            for a in Aggregation::ALL {
+                                let on = agg.as_ref() == Some(&a);
+                                if ui.selectable_label(on, a.name()).clicked() && !on {
+                                    picked_hp = Some(HitPolicy::Collect(Some(a)));
+                                }
+                            }
+                        });
+                    }
+                    if let Some(hit_policy) = picked_hp {
+                        acts.push(Act::Edit(Edit::HitPolicy { decision, hit_policy }));
+                    }
+                    let file_lang = l.defs().expression_language.as_deref();
+                    let mut picked = None;
+                    egui::ComboBox::from_id_salt("file_language")
+                        .selected_text(head.lang.as_ref().unwrap_or(&hg.feel).clone())
+                        .width(130.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(file_lang.is_none(), "FEEL (default)").clicked() && file_lang.is_some() {
+                                picked = Some(None);
+                            }
+                            for (name, v) in Language::CHOICES.iter().skip(1) {
+                                let on = file_lang.is_some_and(|f| v.is_some_and(|v| f.eq_ignore_ascii_case(v)));
+                                if ui.selectable_label(on, *name).clicked() && !on {
+                                    picked = Some(v.map(str::to_string));
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Expression language for the whole file. Cells and inputs can override it.");
+                    if let Some(lang) = picked {
+                        acts.push(Act::Edit(Edit::FileLanguage { lang }));
+                    }
+                } else if let Some(g) = &head.hit_pill {
+                    pill_galley(ui, g, t.chip, t.muted).on_hover_text("Hit policy");
+                }
+                if let Some(g) = &head.shape {
+                    pill_galley(ui, g, t.chip, t.muted);
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(v) = dmn_version {
-                    pill(ui, format!("DMN {v}"), t.chip, t.muted).on_hover_text("DMN version, from the file's namespace");
+                if let Some(g) = &head.version {
+                    pill_galley(ui, g, t.chip, t.muted).on_hover_text("DMN version, from the file's namespace");
                 }
-                if button(ui, &t, ic::PLAY, "Run tests", true).clicked() {
+                if button_galley(ui, &t, &hg.run, true).clicked() {
                     acts.push(Act::View(View::Test));
                 }
                 if let Some(d) = dec {
-                    let has = self.memos.get(key, &d.id).is_some();
-                    let r = button(ui, &t, ic::NOTE, if has { "Note" } else { "Add note" }, false)
+                    let has = memos.get(key, &d.id).is_some();
+                    let r = button_galley(ui, &t, if has { &hg.note } else { &hg.add_note }, false)
                         .on_hover_text("Local note for this decision. Only on this machine, gone when the app closes (Ctrl+Shift+N)");
-                    self.memo_anchor = r.rect;
+                    *memo_anchor = r.rect;
                     if r.clicked() {
                         acts.push(Act::Memo);
                     }
                 }
                 if fixing {
-                    pill(ui, "Fixing: the table is read-only", t.warn.gamma_multiply(if t.dark { 0.25 } else { 0.15 }), t.warn_text);
+                    pill_galley(ui, &hg.fixing, t.warn.gamma_multiply(if t.dark { 0.25 } else { 0.15 }), t.warn_text);
                 }
-                if dirty && !fixing && button(ui, &t, ic::SAVE, "Save", false).on_hover_text("Ctrl+S").clicked() {
+                if dirty && !fixing && button_galley(ui, &t, &hg.save, false).on_hover_text("Ctrl+S").clicked() {
                     acts.push(Act::Save);
                 }
-                if dirty && !fixing && button(ui, &t, ic::SEARCH, "Review", false).on_hover_text("Review the unsaved changes (Ctrl+D)").clicked() {
+                if dirty && !fixing && button_galley(ui, &t, &hg.review, false).on_hover_text("Review the unsaved changes (Ctrl+D)").clicked() {
                     acts.push(Act::Review);
                 }
-                if fixable > 0
-                    && !fixing
-                    && button(ui, &t, ic::CHECK, &format!("Fix issues ({fixable})"), false)
-                        .on_hover_text("Go through the issues that have an automatic fix, one at a time. You confirm every change.")
-                        .clicked()
-                {
-                    acts.push(Act::FixStart(None));
+                if fixable > 0 && !fixing {
+                    let g = hg.fix(ui, &t, fixable);
+                    if button_galley(ui, &t, &g, false).on_hover_text("Go through the issues that have an automatic fix, one at a time. You confirm every change.").clicked() {
+                        acts.push(Act::FixStart(None));
+                    }
                 }
-                if view != View::Issues && button(ui, &t, ic::COPY, "Copy report", false).on_hover_text("Copy all issues as text").clicked() {
+                if view != View::Issues && button_galley(ui, &t, &hg.copy, false).on_hover_text("Copy all issues as text").clicked() {
                     ui.ctx().copy_text(lint::report(l.defs(), l.issues(), &l.path().display().to_string()));
                 }
                 if view == View::Rules {
@@ -2164,14 +2267,15 @@ impl App {
                         .inner_margin(Margin::symmetric(10, 5))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if !rules.filter.is_empty() && ui.add(egui::Button::new(RichText::new(ic::X).color(t.muted)).frame(false)).clicked() {
+                                if !rules.filter.is_empty() && ui.add(egui::Button::new(hg.clear.clone()).frame(false)).clicked() {
                                     rules.filter.clear();
                                 }
-                                let filter = ui.add(egui::TextEdit::singleline(&mut rules.filter).frame(Frame::NONE).hint_text("Filter rules").desired_width(170.0));
-                                if std::mem::take(&mut self.shell.focus_filter) {
+                                let filter = ui.add(egui::TextEdit::singleline(&mut rules.filter).frame(Frame::NONE).hint_text(hg.hint.clone()).desired_width(170.0));
+                                if std::mem::take(&mut shell.focus_filter) {
                                     filter.request_focus();
                                 }
-                                ui.label(RichText::new(ic::SEARCH).color(t.faint));
+                                let (r, _) = ui.allocate_exact_size(hg.search.size(), Sense::hover());
+                                ui.painter().galley(r.min, hg.search.clone(), t.faint);
                             });
                         });
                 }
