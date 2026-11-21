@@ -322,7 +322,143 @@ fn dot(ui: &mut egui::Ui, color: Color32, size: f32) {
     ui.painter().circle_filled(r.center(), size / 2.0, color);
 }
 
-fn nav_item(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str, badge: Option<(String, Color32, Color32)>, active: bool, mark: bool) -> egui::Response {
+fn glyph(ui: &egui::Ui, text: &str, font: FontId) -> Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER)
+}
+
+fn badge_glyph(ui: &egui::Ui, text: &str) -> Arc<egui::Galley> {
+    glyph(ui, text, FontId::new(11.0, bold_family()))
+}
+
+struct Label {
+    plain: Arc<egui::Galley>,
+    bold: Arc<egui::Galley>,
+}
+
+impl Label {
+    fn new(ui: &egui::Ui, text: &str) -> Label {
+        Label { plain: glyph(ui, text, FontId::proportional(13.5)), bold: glyph(ui, text, FontId::new(13.5, bold_family())) }
+    }
+
+    fn pick(&self, active: bool) -> &Arc<egui::Galley> {
+        if active { &self.bold } else { &self.plain }
+    }
+}
+
+struct Glyphs {
+    ppp: f32,
+    brand: Arc<egui::Galley>,
+    grid: Arc<egui::Galley>,
+    decisions: Arc<egui::Galley>,
+    views: Arc<egui::Galley>,
+    decision: Arc<egui::Galley>,
+    note: Arc<egui::Galley>,
+    note_small: Arc<egui::Galley>,
+    items: [(Arc<egui::Galley>, Label); 5],
+    notes_badge: Option<(usize, Arc<egui::Galley>)>,
+}
+
+impl Glyphs {
+    fn new(ui: &egui::Ui, ppp: f32) -> Glyphs {
+        let icon = |s: &str| glyph(ui, s, FontId::proportional(16.0));
+        let group = |s: &str| glyph(ui, s, FontId::new(10.5, bold_family()));
+        Glyphs {
+            ppp,
+            brand: glyph(ui, "DMN Viewer", FontId::new(14.5, bold_family())),
+            grid: glyph(ui, ic::GRID, FontId::proportional(14.0)),
+            decisions: group("DECISIONS"),
+            views: group("VIEW"),
+            decision: icon(ic::DECISION),
+            note: glyph(ui, ic::NOTE, FontId::proportional(14.0)),
+            note_small: glyph(ui, ic::NOTE, FontId::proportional(13.0)),
+            items: [
+                (icon(ic::TABLE), Label::new(ui, "Rules")),
+                (icon(ic::WARNING), Label::new(ui, "Issues")),
+                (icon(ic::FLASK), Label::new(ui, "Test")),
+                (icon(ic::CODE), Label::new(ui, "XML")),
+                (icon(ic::NOTE), Label::new(ui, "Notes")),
+            ],
+            notes_badge: None,
+        }
+    }
+}
+
+struct NavRow {
+    name: Label,
+    badge: Arc<egui::Galley>,
+    alert: bool,
+}
+
+#[derive(Default)]
+struct NavCache {
+    key: Option<(u64, f32)>,
+    rows: Vec<NavRow>,
+    tally: Vec<lint::Tally>,
+    global: lint::Tally,
+    issues: Option<(usize, Arc<egui::Galley>, bool)>,
+    tests: Option<((usize, usize), Arc<egui::Galley>)>,
+}
+
+impl NavCache {
+    fn sync(&mut self, ui: &egui::Ui, l: &Workspace, ppp: f32) {
+        let key = (l.revision(), ppp);
+        if self.key == Some(key) {
+            return;
+        }
+        let defs = l.defs();
+        let (tally, global) = lint::tally(l.issues(), defs.decisions.len());
+        self.rows = defs
+            .decisions
+            .iter()
+            .zip(&tally)
+            .map(|(d, ty)| {
+                let count = match (&d.logic, ty.errors) {
+                    (_, e) if e > 0 => e.to_string(),
+                    (DecisionLogic::Table(tb), _) => tb.rules.len().to_string(),
+                    (DecisionLogic::Literal { .. }, _) => "expr".into(),
+                    (DecisionLogic::None, _) => "-".into(),
+                };
+                NavRow { name: Label::new(ui, if d.name.is_empty() { &d.id } else { &d.name }), badge: badge_glyph(ui, &count), alert: ty.errors > 0 }
+            })
+            .collect();
+        self.tally = tally;
+        self.global = global;
+        self.issues = None;
+        if self.key.is_some_and(|(_, p)| p != ppp) {
+            self.tests = None;
+        }
+        self.key = Some(key);
+    }
+
+    fn issue_badge(&mut self, ui: &egui::Ui, decision: usize) -> (Arc<egui::Galley>, bool) {
+        if self.issues.as_ref().is_none_or(|(d, ..)| *d != decision) {
+            let ty = self.tally.get(decision).copied().unwrap_or_default().with(self.global);
+            self.issues = Some((decision, badge_glyph(ui, &ty.issues.to_string()), ty.errors > 0));
+        }
+        self.issues.as_ref().map_or_else(|| (badge_glyph(ui, "0"), false), |(_, g, e)| (g.clone(), *e))
+    }
+
+    fn test_badge(&mut self, ui: &egui::Ui, stats: Option<(usize, usize)>) -> Option<(Arc<egui::Galley>, bool)> {
+        let Some(s) = stats else {
+            self.tests = None;
+            return None;
+        };
+        if self.tests.as_ref().is_none_or(|(k, _)| *k != s) {
+            self.tests = Some((s, badge_glyph(ui, &format!("{}/{}", s.0, s.1))));
+        }
+        self.tests.as_ref().map(|(_, g)| (g.clone(), s.0 == s.1))
+    }
+}
+
+fn nav_item(
+    ui: &mut egui::Ui,
+    t: &Theme,
+    icon: &Arc<egui::Galley>,
+    label: &Arc<egui::Galley>,
+    badge: Option<(&Arc<egui::Galley>, Color32, Color32)>,
+    active: bool,
+    mark: Option<&Arc<egui::Galley>>,
+) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     let p = ui.painter();
     if active {
@@ -330,22 +466,27 @@ fn nav_item(ui: &mut egui::Ui, t: &Theme, icon: &str, label: &str, badge: Option
     } else if resp.hovered() {
         p.rect_filled(rect, CornerRadius::same(7), if t.dark { t.hover } else { hex(0xeceef2) });
     }
-    let fg = if active { t.text } else { t.muted };
-    p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, icon, FontId::proportional(16.0), if active { t.accent } else { t.muted });
-    p.text(rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, label, FontId::new(13.5, if active { bold_family() } else { FontFamily::Proportional }), fg);
+    let y = rect.center().y;
+    p.galley(egui::pos2(rect.left() + 10.0, y - icon.size().y / 2.0), icon.clone(), if active { t.accent } else { t.muted });
+    p.galley(egui::pos2(rect.left() + 34.0, y - label.size().y / 2.0), label.clone(), if active { t.text } else { t.muted });
     let mut right = rect.right() - 8.0;
-    if let Some((text, bg, color)) = badge {
-        let galley = p.layout_no_wrap(text, FontId::new(11.0, bold_family()), color);
+    if let Some((galley, bg, color)) = badge {
         let w = galley.size().x + 14.0;
-        let r = egui::Rect::from_center_size(egui::pos2(right - w / 2.0, rect.center().y), vec2(w, 18.0));
+        let r = egui::Rect::from_center_size(egui::pos2(right - w / 2.0, y), vec2(w, 18.0));
         p.rect_filled(r, CornerRadius::same(9), bg);
-        p.galley(r.center() - galley.size() / 2.0, galley, color);
+        p.galley(r.center() - galley.size() / 2.0, galley.clone(), color);
         right = r.left() - 4.0;
     }
-    if mark {
-        p.text(egui::pos2(right, rect.center().y), Align2::RIGHT_CENTER, ic::NOTE, FontId::proportional(14.0), t.warn_text);
+    if let Some(g) = mark {
+        p.galley(egui::pos2(right - g.size().x, y - g.size().y / 2.0), g.clone(), t.warn_text);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn group_glyph(ui: &mut egui::Ui, t: &Theme, g: &Arc<egui::Galley>) {
+    ui.add_space(4.0);
+    let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
+    ui.painter().galley(r.min, g.clone(), t.faint);
 }
 
 fn memo_preview(ui: &mut egui::Ui, t: &Theme, f: &memo::File, ws: Option<&Workspace>) {
@@ -361,11 +502,6 @@ fn memo_preview(ui: &mut egui::Ui, t: &Theme, f: &memo::File, ws: Option<&Worksp
     if f.memos.len() > 4 {
         ui.label(RichText::new(format!("and {} more", f.memos.len() - 4)).color(t.muted));
     }
-}
-
-fn group_label(ui: &mut egui::Ui, t: &Theme, text: &str) {
-    ui.add_space(4.0);
-    ui.label(bold(text.to_uppercase(), 10.5).color(t.faint));
 }
 
 fn card<R>(ui: &mut egui::Ui, t: &Theme, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
@@ -615,6 +751,8 @@ struct Tab {
     rules: RuleCache,
     sev_filter: Option<Severity>,
     header_form: Option<HeaderForm>,
+    nav: NavCache,
+    crumb: Option<(bool, f32, Arc<egui::Galley>)>,
 }
 
 impl Tab {
@@ -625,7 +763,20 @@ impl Tab {
     }
 
     fn lazy(path: PathBuf, key: PathBuf, uid: u64) -> Tab {
-        Tab { uid, key, label: tabs::label(&path), path, title: None, ws: None, tester: Tester::default(), rules: RuleCache::default(), sev_filter: None, header_form: None }
+        Tab {
+            uid,
+            key,
+            label: tabs::label(&path),
+            path,
+            title: None,
+            ws: None,
+            tester: Tester::default(),
+            rules: RuleCache::default(),
+            sev_filter: None,
+            header_form: None,
+            nav: NavCache::default(),
+            crumb: None,
+        }
     }
 
     fn dirty(&self) -> bool {
@@ -639,6 +790,7 @@ impl Tab {
         self.key = tabs::key(&self.path);
         self.label = tabs::label(&self.path);
         self.title = None;
+        self.crumb = None;
     }
 
     fn title(&mut self, ui: &egui::Ui, max_width: f32) -> Arc<egui::Galley> {
@@ -677,6 +829,7 @@ struct App {
     memo_quiet: bool,
     memo_tick: bool,
     show_notes: bool,
+    glyphs: Option<Glyphs>,
     settings: menu::Settings,
     shell: menu::Shell,
 }
@@ -778,6 +931,7 @@ impl App {
             memo_quiet: false,
             memo_tick: false,
             show_notes: false,
+            glyphs: None,
             settings: menu::Settings::load(),
             shell: menu::Shell::default(),
         };
@@ -1683,6 +1837,7 @@ impl App {
     }
 
     fn tab_strip(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        self.glyphs(ui);
         let t = self.theme;
         let reveal = std::mem::take(&mut self.reveal_tab);
         let active = self.active;
@@ -1712,6 +1867,7 @@ impl App {
                             x += 13.0;
                         }
                         let notes = self.memos.count(&tab.key);
+                        let note_glyph = self.glyphs.as_ref().map(|g| g.note_small.clone());
                         let end = close_rect.left() - 4.0 - if notes > 0 { 15.0 } else { 0.0 };
                         let title = tab.title(ui, (end - x).max(0.0).floor());
                         let p = ui.painter();
@@ -1725,8 +1881,10 @@ impl App {
                             p.circle_filled(egui::pos2(rect.left() + 14.5, rect.center().y), 3.5, t.accent);
                         }
                         p.galley(egui::pos2(x, rect.center().y - title.size().y / 2.0), title, if on { t.text } else { t.muted });
-                        if notes > 0 {
-                            p.text(egui::pos2(close_rect.left() - 3.0, rect.center().y), Align2::RIGHT_CENTER, ic::NOTE, FontId::proportional(13.0), t.warn_text);
+                        if notes > 0
+                            && let Some(g) = note_glyph
+                        {
+                            p.galley(egui::pos2(close_rect.left() - 3.0 - g.size().x, rect.center().y - g.size().y / 2.0), g, t.warn_text);
                         }
                         if on || hovered {
                             if close.hovered() {
@@ -1809,73 +1967,85 @@ impl App {
         });
     }
 
-    fn nav(&self, ui: &mut egui::Ui, suite_stats: Option<(usize, usize)>, acts: &mut Vec<Act>) {
-        let t = &self.theme;
+    fn glyphs(&mut self, ui: &egui::Ui) {
+        let ppp = ui.ctx().pixels_per_point();
+        if self.glyphs.as_ref().is_none_or(|g| g.ppp != ppp) {
+            self.glyphs = Some(Glyphs::new(ui, ppp));
+        }
+    }
+
+    fn nav(&mut self, ui: &mut egui::Ui, suite_stats: Option<(usize, usize)>, acts: &mut Vec<Act>) {
+        self.glyphs(ui);
+        let App { glyphs: Some(g), tabs, active, theme: t, memos, show_notes, .. } = self else { return };
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
             ui.painter().rect_filled(r, CornerRadius::same(6), t.accent);
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, ic::GRID, FontId::proportional(14.0), t.on_accent);
-            ui.label(bold("DMN Viewer", 14.5).color(t.text));
+            ui.painter().galley(r.center() - g.grid.size() / 2.0, g.grid.clone(), t.on_accent);
+            let (r, _) = ui.allocate_exact_size(g.brand.size(), Sense::hover());
+            ui.painter().galley(r.min, g.brand.clone(), t.text);
         });
         ui.add_space(14.0);
-        if let Some(l) = self.ws() {
-            group_label(ui, t, "Decisions");
-            let file = self.tab().and_then(|tab| self.memos.file(&tab.key));
-            for (i, d) in l.defs().decisions.iter().enumerate() {
-                let errs = l.issues().iter().filter(|x| x.decision == Some(i) && x.severity == Severity::Error).count();
-                let count = match &d.logic {
-                    DecisionLogic::Table(tb) => tb.rules.len().to_string(),
-                    DecisionLogic::Literal { .. } => "expr".into(),
-                    DecisionLogic::None => "-".into(),
-                };
-                let active = self.decision() == i;
-                let badge = if errs > 0 {
-                    (errs.to_string(), t.error, hex(0xffffff))
-                } else if active {
-                    (count, t.accent_soft, t.accent)
-                } else {
-                    (count, t.chip, t.muted)
-                };
-                let name = if d.name.is_empty() { &d.id } else { &d.name };
-                let note = file.and_then(|f| f.get(&d.id));
-                let mut resp = nav_item(ui, t, ic::DECISION, name, Some(badge), active, note.is_some());
-                if let Some(text) = note {
-                    resp = resp.on_hover_ui(|ui| {
-                        ui.set_max_width(300.0);
-                        ui.label(RichText::new(text).color(t.text));
-                    });
-                }
-                if resp.clicked() {
-                    acts.push(Act::Decision(i));
-                }
+        let Some(Tab { ws: Some(l), nav, key, .. }) = tabs.get_mut(*active) else { return };
+        let l = &*l;
+        nav.sync(ui, l, g.ppp);
+        let decision = l.decision();
+        let view = l.view();
+        group_glyph(ui, t, &g.decisions);
+        let file = memos.file(key);
+        for (i, (d, row)) in l.defs().decisions.iter().zip(&nav.rows).enumerate() {
+            let active = decision == i;
+            let (bg, fg) = if row.alert {
+                (t.error, hex(0xffffff))
+            } else if active {
+                (t.accent_soft, t.accent)
+            } else {
+                (t.chip, t.muted)
+            };
+            let note = file.and_then(|f| f.get(&d.id));
+            let mut resp = nav_item(ui, t, &g.decision, row.name.pick(active), Some((&row.badge, bg, fg)), active, note.map(|_| &g.note));
+            if let Some(text) = note {
+                resp = resp.on_hover_ui(|ui| {
+                    ui.set_max_width(300.0);
+                    ui.label(RichText::new(text).color(t.text));
+                });
             }
-            ui.add_space(12.0);
-            group_label(ui, t, "View");
-            let n = l.issues().iter().filter(|x| x.decision == Some(self.decision()) || x.decision.is_none()).count();
-            let errs = l.issues().iter().filter(|x| (x.decision == Some(self.decision()) || x.decision.is_none()) && x.severity == Severity::Error).count();
-            let issue_badge = if errs > 0 { (n.to_string(), t.error, hex(0xffffff)) } else { (n.to_string(), t.chip, t.muted) };
-            let test_badge = suite_stats.map(|(p, total)| if p == total { (format!("{p}/{total}"), t.accent_soft, t.accent) } else { (format!("{p}/{total}"), t.error, hex(0xffffff)) });
-            for (v, icon, label, badge) in
-                [(View::Rules, ic::TABLE, "Rules", None), (View::Issues, ic::WARNING, "Issues", Some(issue_badge)), (View::Test, ic::FLASK, "Test", test_badge), (View::Xml, ic::CODE, "XML", None)]
-            {
-                if nav_item(ui, t, icon, label, badge, !self.show_notes && self.view() == v, false).clicked() {
-                    acts.push(Act::View(v));
-                }
+            if resp.clicked() {
+                acts.push(Act::Decision(i));
             }
-            let total = self.memos.total();
-            if nav_item(ui, t, ic::NOTE, "Notes", (total > 0).then(|| (total.to_string(), t.warn.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.warn_text)), self.show_notes, false)
-                .on_hover_text("Local notes from every tab (Ctrl+5)")
-                .clicked()
-            {
-                acts.push(Act::Notes);
-            }
-            ui.add_space(12.0);
         }
+        ui.add_space(12.0);
+        group_glyph(ui, t, &g.views);
+        let (issues, alert) = nav.issue_badge(ui, decision);
+        let issue_colors = if alert { (t.error, hex(0xffffff)) } else { (t.chip, t.muted) };
+        let tests = nav.test_badge(ui, suite_stats);
+        for (v, (icon, label)) in [View::Rules, View::Issues, View::Test, View::Xml].into_iter().zip(&g.items) {
+            let badge = match v {
+                View::Issues => Some((&issues, issue_colors.0, issue_colors.1)),
+                View::Test => tests.as_ref().map(|(b, pass)| if *pass { (b, t.accent_soft, t.accent) } else { (b, t.error, hex(0xffffff)) }),
+                _ => None,
+            };
+            let on = !*show_notes && view == v;
+            if nav_item(ui, t, icon, label.pick(on), badge, on, None).clicked() {
+                acts.push(Act::View(v));
+            }
+        }
+        let total = memos.total();
+        if total == 0 {
+            g.notes_badge = None;
+        } else if g.notes_badge.as_ref().is_none_or(|(n, _)| *n != total) {
+            g.notes_badge = Some((total, badge_glyph(ui, &total.to_string())));
+        }
+        let (icon, label) = &g.items[4];
+        let badge = g.notes_badge.as_ref().map(|(_, b)| (b, t.warn.gamma_multiply(if t.dark { 0.28 } else { 0.2 }), t.warn_text));
+        if nav_item(ui, t, icon, label.pick(*show_notes), badge, *show_notes, None).on_hover_text("Local notes from every tab (Ctrl+5)").clicked() {
+            acts.push(Act::Notes);
+        }
+        ui.add_space(12.0);
     }
 
     fn header(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let t = self.theme;
-        let Some(Tab { ws: Some(l), rules, label: file, key, .. }) = self.tabs.get_mut(self.active) else { return };
+        let Some(Tab { ws: Some(l), rules, label: file, key, crumb, .. }) = self.tabs.get_mut(self.active) else { return };
         let l = &*l;
         let decision = l.decision();
         let view = l.view();
@@ -1885,7 +2055,15 @@ impl App {
         let fixable = l.fixable_count();
         let dmn_version = l.defs().dmn_version;
         ui.horizontal_centered(|ui| {
-            ui.label(RichText::new(format!("{file}{}  /", if dirty { " •" } else { "" })).color(t.faint)).on_hover_text(if dirty { "Unsaved changes (Ctrl+S to save)" } else { "Saved" });
+            let ppp = ui.ctx().pixels_per_point();
+            if crumb.as_ref().is_none_or(|(d, p, _)| *d != dirty || *p != ppp) {
+                *crumb = Some((dirty, ppp, glyph(ui, &format!("{file}{}  /", if dirty { " \u{2022}" } else { "" }), egui::TextStyle::Body.resolve(ui.style()))));
+            }
+            if let Some((_, _, g)) = crumb.as_ref() {
+                let (r, resp) = ui.allocate_exact_size(g.size(), Sense::hover());
+                ui.painter().galley(r.min, g.clone(), t.faint);
+                resp.on_hover_text(if dirty { "Unsaved changes (Ctrl+S to save)" } else { "Saved" });
+            }
             if let Some(d) = dec {
                 ui.label(bold(if d.name.is_empty() { &d.id } else { &d.name }, 14.0).color(t.text));
                 if let DecisionLogic::Table(tb) = &d.logic {
@@ -3500,11 +3678,10 @@ impl eframe::App for App {
                 .show(ui, |ui| self.nav(ui, suite_stats, &mut acts));
         }
 
-        let shown = self.error.clone().or_else(|| self.ws().and_then(|l| l.error()).map(str::to_string));
-        if let Some(e) = shown {
+        if let Some(e) = self.error.as_deref().or_else(|| self.ws().and_then(|l| l.error())).map(RichText::new) {
             egui::Panel::top("err").frame(Frame::new().fill(if t.dark { hex(0x3a1f22) } else { hex(0xfdeeee) }).inner_margin(Margin::symmetric(20, 8))).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(e).color(t.error_text));
+                    ui.label(e.color(t.error_text));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.add(egui::Button::new(RichText::new(ic::X).color(t.error_text)).frame(false)).clicked() {
                             self.error = None;

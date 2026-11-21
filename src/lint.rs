@@ -817,6 +817,35 @@ pub fn gap_text(t: &DecisionTable, gap: &gaps::Gap) -> String {
     if parts.is_empty() { "any input".into() } else { parts.join(", ") }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub issues: usize,
+    pub errors: usize,
+}
+
+impl Tally {
+    pub fn with(self, other: Tally) -> Tally {
+        Tally { issues: self.issues + other.issues, errors: self.errors + other.errors }
+    }
+}
+
+pub fn tally(issues: &[Issue], decisions: usize) -> (Vec<Tally>, Tally) {
+    let mut per = vec![Tally::default(); decisions];
+    let mut global = Tally::default();
+    for x in issues {
+        let slot = match x.decision {
+            None => &mut global,
+            Some(d) => match per.get_mut(d) {
+                Some(s) => s,
+                None => continue,
+            },
+        };
+        slot.issues += 1;
+        slot.errors += usize::from(x.severity == Severity::Error);
+    }
+    (per, global)
+}
+
 pub fn report(defs: &Definitions, issues: &[Issue], source: &str) -> String {
     let mut s = String::new();
     let count = |sev| issues.iter().filter(|i| i.severity == sev).count();

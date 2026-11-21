@@ -226,5 +226,31 @@ fn suite_run(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, document, session, fixing, suite_run);
+fn nav_counts(c: &mut Criterion) {
+    const DECISIONS: usize = 40;
+    let issues: Vec<lint::Issue> = (0..4000)
+        .map(|i| lint::Issue {
+            severity: if i % 4 == 0 { lint::Severity::Error } else { lint::Severity::Warning },
+            code: "bench",
+            decision: (i % 13 != 0).then_some(i % DECISIONS),
+            rules: Vec::new(),
+            column: None,
+            message: String::new(),
+        })
+        .collect();
+    let mut g = c.benchmark_group("nav_counts");
+    g.bench_function("filter_per_decision", |b| {
+        b.iter(|| {
+            let mut out = [(0usize, 0usize); DECISIONS];
+            for (d, slot) in out.iter_mut().enumerate() {
+                *slot = (issues.iter().filter(|x| x.decision == Some(d)).count(), issues.iter().filter(|x| x.decision == Some(d) && x.severity == lint::Severity::Error).count());
+            }
+            black_box(out)
+        })
+    });
+    g.bench_function("tally_one_pass", |b| b.iter(|| black_box(lint::tally(black_box(&issues), DECISIONS))));
+    g.finish();
+}
+
+criterion_group!(benches, document, session, fixing, suite_run, nav_counts);
 criterion_main!(benches);
